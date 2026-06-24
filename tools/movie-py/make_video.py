@@ -1,16 +1,20 @@
 """Build a slideshow video from images in a folder.
 
 Core function: build_video(input_folder, display_seconds, transition_seconds)
-CLI: python make_video.py <input_folder> [--display 10] [--transition 1]
+CLI: python make_video.py <input_folder> [--display 5] [--transition 1]
 
 Requires a movie.json file alongside the images:
     {
       "title": "My Video Title",
       "images": [
-        {"file": "0_134526.png", "text": "Caption for image 0"},
-        {"file": "1_134603.png", "text": "Caption for image 1"}
+        {"image": "0_134526.png", "text": "Caption for image 0", "audio": "0.mp3"},
+        {"image": "1_134603.png", "text": "Caption for image 1", "audio": ""}
       ]
     }
+
+Each slide's duration equals its audio file's duration. Slides without audio
+fall back to --display seconds (default 5). A 10s silent Voronoi intro precedes
+the slides. `audio` is optional; empty string or missing means no audio.
 """
 from __future__ import annotations
 
@@ -27,7 +31,7 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 SUPPORTED_EXT = (".jpg", ".jpeg", ".png", ".webp")
-DEFAULT_DISPLAY = 10
+DEFAULT_DISPLAY = 5
 DEFAULT_TRANSITION = 1
 INTRO_SECONDS = 10
 FPS = 30
@@ -59,7 +63,11 @@ class MovieSpecError(ValueError):
 def load_movie(input_folder: Path) -> tuple[str, list[dict]]:
     """Load and validate movie.json. Returns (title, images_entries).
 
-    Each entry: {"file": <name>, "text": <str or None>, "path": <Path>}.
+    Each entry: {"image": <name>, "text": <str or None>,
+                 "audio": <Path or None>, "path": <Path>}.
+
+    `image` is required. `text` and `audio` are optional. `audio` resolves
+    against input_folder; empty/missing means no audio (uses fallback duration).
     """
     meta_path = input_folder / "movie.json"
     if not meta_path.is_file():
@@ -87,16 +95,32 @@ def load_movie(input_folder: Path) -> tuple[str, list[dict]]:
     for i, e in enumerate(entries):
         if not isinstance(e, dict):
             raise MovieSpecError(f"movie.json: images[{i}] must be an object")
-        fname = e.get("file")
+        fname = e.get("image")
         if not isinstance(fname, str) or not fname:
-            raise MovieSpecError(f"movie.json: images[{i}].file is required")
+            raise MovieSpecError(f"movie.json: images[{i}].image is required")
         if fname not in image_names:
             raise MovieSpecError(
-                f"movie.json: images[{i}].file '{fname}' not found in folder")
+                f"movie.json: images[{i}].image '{fname}' not found in folder")
         text = e.get("text")
         if text is not None and not isinstance(text, str):
             raise MovieSpecError(f"movie.json: images[{i}].text must be a string if present")
-        norm_entries.append({"file": fname, "text": text, "path": image_names[fname]})
+        audio_name = e.get("audio", "")
+        if audio_name is None:
+            audio_name = ""
+        if not isinstance(audio_name, str):
+            raise MovieSpecError(f"movie.json: images[{i}].audio must be a string if present")
+        audio_path: Path | None = None
+        if audio_name:
+            audio_path = (input_folder / audio_name)
+            if not audio_path.is_file():
+                raise MovieSpecError(
+                    f"movie.json: images[{i}].audio '{audio_name}' not found in folder")
+        norm_entries.append({
+            "image": fname,
+            "text": text,
+            "audio": audio_path,
+            "path": image_names[fname],
+        })
 
     if len(norm_entries) != len(image_files):
         raise MovieSpecError(
@@ -425,7 +449,7 @@ def build_video(
     title, entries = load_movie(input_folder)
     image_paths = [e["path"] for e in entries]
 
-    from moviepy import ImageClip, CompositeVideoClip
+    from moviepy import ImageClip, CompositeVideoClip, AudioFileClip
     try:
         from moviepy.video.fx import CrossFadeIn
     except Exception:
@@ -442,33 +466,41 @@ def build_video(
         image_paths, title, target_w, target_h, INTRO_SECONDS, rng)
 
     # 2. Per-image clips with captions, crossfades between consecutive clips.
-    image_clips = []
+    #    Slide duration = audio duration if present, else display_seconds.
+    image_clips: list = []
+    durations: list[float] = []
+    audio_clips: list = []
     for e in entries:
         arr = load_normalized(e["path"], target_w, target_h)
         text = e.get("text")
         if text:
             arr = overlay_caption_on_array(arr, text)
-        clip = ImageClip(arr).with_duration(display_seconds)
+        if e.get("audio") is not None:
+            a = AudioFileClip(str(e["audio"]))
+            audio_clips.append(a)
+            dur = float(a.duration)
+            clip = ImageClip(arr).with_duration(dur).with_audio(a)
+        else:
+            dur = float(display_seconds)
+            clip = ImageClip(arr).with_duration(dur)
         image_clips.append(clip)
+        durations.append(dur)
 
     # Assemble timeline: intro + image_clips with crossfades.
-    all_clips = [intro_clip] + image_clips
     # intro starts at 0; first image starts at (INTRO_SECONDS - transition) so it
     # crossfades over the tail of the intro; subsequent images step by
-    # (display_seconds - transition_seconds).
+    # (prev_duration - transition_seconds).
     intro_clip = intro_clip.with_start(0)
+    start = INTRO_SECONDS - transition_seconds
     for i, clip in enumerate(image_clips):
-        if i == 0:
-            start = INTRO_SECONDS - transition_seconds
-        else:
-            start = (INTRO_SECONDS - transition_seconds) + i * (display_seconds - transition_seconds)
         clip = clip.with_start(start)
         clip = clip.with_effects([CrossFadeIn(transition_seconds)])
         image_clips[i] = clip
+        start += durations[i] - transition_seconds
 
-    total_duration = (INTRO_SECONDS
-                      + len(image_clips) * display_seconds
-                      - (len(image_clips)) * transition_seconds)
+    # After the loop, `start` is one transition past the last clip's end
+    # (it was incremented after the last clip was placed). Add it back.
+    total_duration = start + transition_seconds
 
     composite = CompositeVideoClip(
         [intro_clip] + image_clips, size=(target_w, target_h))
@@ -485,12 +517,12 @@ def build_video(
         str(output_path),
         fps=FPS,
         codec=CODEC,
-        audio=False,
+        audio_codec="aac",
         ffmpeg_params=["-pix_fmt", "yuv420p"],
         logger=None,
     )
 
-    for c in [intro_clip] + image_clips:
+    for c in [intro_clip] + image_clips + audio_clips:
         try:
             c.close()
         except Exception:
@@ -521,7 +553,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Build a slideshow video from images.")
     parser.add_argument("input_folder", help="Folder containing input images + movie.json")
     parser.add_argument("--display", type=float, default=DEFAULT_DISPLAY,
-                        help="Seconds each image is displayed (default 10)")
+                        help="Seconds each slide displays when it has no audio (default 5)")
     parser.add_argument("--transition", type=float, default=DEFAULT_TRANSITION,
                         help="Crossfade duration in seconds (default 1)")
     args = parser.parse_args(argv)
