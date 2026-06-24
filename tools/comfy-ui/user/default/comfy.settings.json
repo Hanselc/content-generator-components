@@ -7,7 +7,7 @@
     "Comfy.RightSidePanel.IsOpen": true,
     "Comfy.VueNodes.Enabled": true,
     "Comfy.Toast.DisableReconnectingToast": false,
-    "WorkflowModelsDownloader.HuggingFaceToken": "null",
+    "WorkflowModelsDownloader.HuggingFaceToken": null,
     "ModelManager.APIKey.Civitai": null,
     "ModelManager.APIKey.HuggingFace": null,
     "ModelManager.UI.Flat": true,
