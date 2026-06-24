@@ -1,19 +1,19 @@
-# ComfyUI: cloned fresh by setup.sh — only track user content
-/ComfyUI/*
-!/ComfyUI/user/
-/ComfyUI/user/__manager/
-/ComfyUI/user/*.db
-/ComfyUI/user/*.db.lock
-/ComfyUI/user/*.log
-!/ComfyUI/user/default/
-/ComfyUI/user/default/workflows/*.lock
+# comfy-ui: cloned fresh by setup.sh — only track user content
+/comfy-ui/*
+!/comfy-ui/user/
+/comfy-ui/user/__manager/
+/comfy-ui/user/*.db
+/comfy-ui/user/*.db.lock
+/comfy-ui/user/*.log
+!/comfy-ui/user/default/
+/comfy-ui/user/default/workflows/*.lock
 
-# custom_nodes: ignored by default; add !/ComfyUI/custom_nodes/<your_node> when you create one
-/ComfyUI/custom_nodes/
+# custom_nodes: ignored by default; add !/comfy-ui/custom_nodes/<your_node> when you create one
+/comfy-ui/custom_nodes/
 
-# MoviePy local
-/MoviePy/.env
-/MoviePy/examples/
+# movie-py local
+/movie-py/.env
+/movie-py/examples/
 
 # Python
 __pycache__/

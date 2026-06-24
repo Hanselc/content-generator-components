@@ -7,4 +7,4 @@ env_prefix="$dir/../.conda-envs/comfyui"
 root="$(cd "$dir/.." && pwd)"
 
 exec stdbuf -oL -eL conda run -p "$env_prefix" --no-capture-output \
-    bash -c "cd '$root/ComfyUI' && exec python -u main.py --enable-manager --listen 0.0.0.0"
+    bash -c "cd '$root/comfy-ui' && exec python -u main.py --enable-manager --listen 0.0.0.0"
