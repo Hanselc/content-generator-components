@@ -1,0 +1,9 @@
+# Local environment config (host-specific paths)
+.env
+
+# Generated example outputs
+/examples/
+
+# Python
+__pycache__/
+*.pyc

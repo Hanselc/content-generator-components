@@ -1,0 +1,18 @@
+{
+    "Comfy.InstalledVersion": "1.45.19",
+    "Comfy.TutorialCompleted": true,
+    "Comfy.Templates.SelectedRunsOn": [
+        "ComfyUI"
+    ],
+    "Comfy.RightSidePanel.IsOpen": true,
+    "Comfy.VueNodes.Enabled": true,
+    "Comfy.Toast.DisableReconnectingToast": false,
+    "WorkflowModelsDownloader.HuggingFaceToken": "null",
+    "ModelManager.APIKey.Civitai": null,
+    "ModelManager.APIKey.HuggingFace": null,
+    "ModelManager.UI.Flat": true,
+    "Comfy.WorkflowActions.SeenItems": [
+        "enter-app-mode",
+        "enter-builder-mode"
+    ]
+}

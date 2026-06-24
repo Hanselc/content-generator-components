@@ -1,0 +1,28 @@
+# ComfyUI: cloned fresh by setup.sh — only track user content
+/ComfyUI/*
+!/ComfyUI/user/
+/ComfyUI/user/__manager/
+/ComfyUI/user/*.db
+/ComfyUI/user/*.db.lock
+/ComfyUI/user/*.log
+!/ComfyUI/user/default/
+/ComfyUI/user/default/workflows/*.lock
+
+# custom_nodes: ignored by default; add !/ComfyUI/custom_nodes/<your_node> when you create one
+/ComfyUI/custom_nodes/
+
+# MoviePy local
+/MoviePy/.env
+/MoviePy/examples/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyc
+.venv/
+venv*/
+
+# OS / editors
+.DS_Store
+.idea/
+.vscode/
