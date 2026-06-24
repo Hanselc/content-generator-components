@@ -4,12 +4,12 @@ set -e
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-if [ ! -d "$root/comfy-ui/.git" ]; then
-    rm -rf "$root/comfy-ui"
-    git clone https://github.com/Comfy-Org/ComfyUI.git "$root/comfy-ui"
+if [ ! -d "$root/tools/comfy-ui/.git" ]; then
+    rm -rf "$root/tools/comfy-ui"
+    git clone https://github.com/Comfy-Org/ComfyUI.git "$root/tools/comfy-ui"
     # Allow parent repo to track user workflows/settings (upstream ignores /user/)
-    sed -i '/^\/user\//d' "$root/comfy-ui/.gitignore"
-    git -C "$root" checkout -- comfy-ui/
+    sed -i '/^\/user\//d' "$root/tools/comfy-ui/.gitignore"
+    git -C "$root" checkout -- tools/comfy-ui/
     echo "ComfyUI ready."
 else
     echo "ComfyUI already present."

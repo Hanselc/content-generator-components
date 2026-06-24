@@ -7,4 +7,4 @@ env_prefix="$dir/../.conda-envs/moviepy"
 root="$(cd "$dir/.." && pwd)"
 
 exec stdbuf -oL -eL conda run -p "$env_prefix" --no-capture-output \
-    bash -c "cd '$root/movie-py' && exec python -u server.py"
+    bash -c "cd '$root/tools/movie-py' && exec python -u server.py"

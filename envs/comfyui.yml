@@ -7,5 +7,5 @@ dependencies:
   - git
   - pip:
       - --extra-index-url https://download.pytorch.org/whl/cu130
-      - -r ../comfy-ui/requirements.txt
-      - -r ../comfy-ui/manager_requirements.txt
+      - -r ../tools/comfy-ui/requirements.txt
+      - -r ../tools/comfy-ui/manager_requirements.txt
