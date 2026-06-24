@@ -18,7 +18,9 @@ from flask import Flask, jsonify, request
 from tts import (
     DEFAULT_CFG_VALUE,
     DEFAULT_INFERENCE_TIMESTEPS,
+    DEFAULT_MAX_LEN,
     DEFAULT_NORMALIZE,
+    DEFAULT_RETRY_BADCASE,
     generate_audio,
 )
 
@@ -37,43 +39,54 @@ MODEL_NAME = os.environ.get("MODEL_NAME", "openbmb/VoxCPM2")
 def _load_reference():
     """Load and validate reference.json + reference audio at startup.
 
-    reference.json lives in this repo alongside the server script and points
-    at two reference clips plus the exact transcript of the prompt clip:
-      - audio:           prompt clip used with its transcript for alignment
-      - text:            exact transcript of the prompt clip
-      - reference_audio: clip used to reinforce the timbre (no transcript)
-    All three fields are required and shared across all requests.
+    reference.json lives in this repo alongside the server script. It points
+    at the prompt clip, its exact transcript, and optionally a reinforce clip:
+      - prompt_audio:      clip used with its transcript for alignment
+      - prompt_text:       exact transcript of the prompt clip
+      - reinforce_audio:   clip used to reinforce the timbre (no transcript)
+      - reinforce_enabled: when false, reinforce_audio is ignored and the
+                           prompt clip is used for both prompt + reference
+    prompt_audio and prompt_text are always required. reinforce_audio is
+    required only when reinforce_enabled is true. All fields are static and
+    shared across all requests.
     """
     ref_path = SCRIPT_DIR / "reference.json"
     if not ref_path.is_file():
         raise RuntimeError(f"reference.json not found: {ref_path}")
     ref = json.loads(ref_path.read_text(encoding="utf-8"))
-    audio_rel = ref.get("audio")
-    prompt_text = ref.get("text")
-    reference_audio_rel = ref.get("reference_audio")
-    if not isinstance(audio_rel, str) or not audio_rel:
-        raise RuntimeError("reference.json: 'audio' field is required and must be a string")
+
+    prompt_audio_rel = ref.get("prompt_audio")
+    prompt_text = ref.get("prompt_text")
+    if not isinstance(prompt_audio_rel, str) or not prompt_audio_rel:
+        raise RuntimeError("reference.json: 'prompt_audio' field is required and must be a string")
     if not isinstance(prompt_text, str) or not prompt_text:
-        raise RuntimeError("reference.json: 'text' field is required and must be a string")
-    if not isinstance(reference_audio_rel, str) or not reference_audio_rel:
-        raise RuntimeError("reference.json: 'reference_audio' field is required and must be a string")
-    audio_path = (SCRIPT_DIR / audio_rel).resolve()
-    if not audio_path.is_file():
+        raise RuntimeError("reference.json: 'prompt_text' field is required and must be a string")
+
+    prompt_audio_path = (SCRIPT_DIR / prompt_audio_rel).resolve()
+    if not prompt_audio_path.is_file():
         raise RuntimeError(
-            f"reference audio file not found: {audio_path} — "
+            f"prompt audio file not found: {prompt_audio_path} — "
             f"please place the reference clip in tools/vox-cpm/references/"
         )
-    reference_audio_path = (SCRIPT_DIR / reference_audio_rel).resolve()
-    if not reference_audio_path.is_file():
-        raise RuntimeError(
-            f"reference reinforce audio file not found: {reference_audio_path} — "
-            f"please place the reinforce clip in tools/vox-cpm/references/"
-        )
-    return {
-        "prompt_wav_path": str(audio_path),
-        "prompt_text": prompt_text,
-        "reference_wav_path": str(reference_audio_path),
-    }
+
+    result = {"prompt_wav_path": str(prompt_audio_path), "prompt_text": prompt_text}
+
+    reinforce_enabled = ref.get("reinforce_enabled", False)
+    if reinforce_enabled:
+        reinforce_audio_rel = ref.get("reinforce_audio")
+        if not isinstance(reinforce_audio_rel, str) or not reinforce_audio_rel:
+            raise RuntimeError(
+                "reference.json: 'reinforce_audio' field is required when reinforce_enabled is true"
+            )
+        reinforce_audio_path = (SCRIPT_DIR / reinforce_audio_rel).resolve()
+        if not reinforce_audio_path.is_file():
+            raise RuntimeError(
+                f"reinforce audio file not found: {reinforce_audio_path} — "
+                f"please place the reinforce clip in tools/vox-cpm/references/"
+            )
+        result["reference_wav_path"] = str(reinforce_audio_path)
+
+    return result
 
 
 try:
@@ -136,6 +149,9 @@ def make_audio():
     cfg_value = float(data.get("cfg_value", DEFAULT_CFG_VALUE))
     inference_timesteps = int(data.get("inference_timesteps", DEFAULT_INFERENCE_TIMESTEPS))
     normalize = bool(data.get("normalize", DEFAULT_NORMALIZE))
+    max_len = int(data.get("max_len", DEFAULT_MAX_LEN))
+    streaming = bool(data.get("streaming", False))
+    retry_badcase = bool(data.get("retry_badcase", DEFAULT_RETRY_BADCASE))
 
     hhmmss = datetime.now().strftime("%H%M%S")
     filename = f"{name_prefix}{hhmmss}.wav"
@@ -146,12 +162,15 @@ def make_audio():
             text=text,
             prompt_wav_path=REFERENCE["prompt_wav_path"],
             prompt_text=REFERENCE["prompt_text"],
-            reference_wav_path=REFERENCE["reference_wav_path"],
+            reference_wav_path=REFERENCE.get("reference_wav_path"),
             output_path=output_path,
             model_name=MODEL_NAME,
             cfg_value=cfg_value,
             inference_timesteps=inference_timesteps,
             normalize=normalize,
+            max_len=max_len,
+            streaming=streaming,
+            retry_badcase=retry_badcase,
         )
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
