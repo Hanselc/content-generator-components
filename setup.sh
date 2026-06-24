@@ -18,7 +18,7 @@ fi
 # 2. Conda envs (workspace-local under .conda-envs/)
 conda activate base 2>/dev/null || source "$(conda info --base)/etc/profile.d/conda.sh"
 
-for env in comfyui moviepy; do
+for env in comfyui moviepy voxcpm; do
     prefix="$root/.conda-envs/$env"
     if [ ! -d "$prefix" ]; then
         echo "Creating conda env '$env' at $prefix ..."

@@ -1,0 +1,14 @@
+name: voxcpm
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip
+  - pip:
+      - torch>=2.5.0
+      - voxcpm
+      - flask>=3.0
+      - gunicorn>=21
+      - soundfile>=0.12
+      - python-dotenv>=1.0
+      - numpy>=1.24

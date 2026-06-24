@@ -1,0 +1,6 @@
+# Local environment config (host-specific paths)
+.env
+
+# Python
+__pycache__/
+*.pyc
