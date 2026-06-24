@@ -1,0 +1,45 @@
+name: comfyui
+channels:
+  - conda-forge
+dependencies:
+  - python=3.13
+  - pip
+  - git
+  - pip:
+      - --extra-index-url https://download.pytorch.org/whl/cu130
+      - torch
+      - torchvision
+      - torchaudio
+      - torchsde
+      - numpy>=1.25.0
+      - einops
+      - transformers>=4.50.3
+      - tokenizers>=0.13.3
+      - sentencepiece
+      - safetensors>=0.4.2
+      - aiohttp>=3.11.8
+      - yarl>=1.18.0
+      - pyyaml
+      - Pillow
+      - scipy
+      - tqdm
+      - psutil
+      - alembic
+      - SQLAlchemy>=2.0.0
+      - filelock
+      - av>=16.0.0
+      - requests
+      - simpleeval>=1.0
+      - blake3
+      - kornia>=0.7.1
+      - spandrel
+      - pydantic~=2.0
+      - pydantic-settings~=2.0
+      - PyOpenGL
+      - glfw
+      - comfyui-frontend-package
+      - comfyui-workflow-templates
+      - comfyui-embedded-docs
+      - comfy-kitchen
+      - comfy-aimdo
+      - comfyui-manager

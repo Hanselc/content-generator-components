@@ -22,6 +22,9 @@ __pycache__/
 .venv/
 venv*/
 
+# Conda workspace envs (created by setup.sh, not versioned)
+.conda-envs/
+
 # OS / editors
 .DS_Store
 .idea/

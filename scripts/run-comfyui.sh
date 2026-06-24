@@ -2,5 +2,9 @@
 
 set -e
 
-exec stdbuf -oL -eL conda run -n comfyui --no-capture-output \
-    bash -c 'cd /opt/tools/ComfyUI && exec python -u main.py --enable-manager --listen 0.0.0.0'
+dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+env_prefix="$dir/../.conda-envs/comfyui"
+root="$(cd "$dir/.." && pwd)"
+
+exec stdbuf -oL -eL conda run -p "$env_prefix" --no-capture-output \
+    bash -c "cd '$root/ComfyUI' && exec python -u main.py --enable-manager --listen 0.0.0.0"
