@@ -73,5 +73,11 @@ def make_video():
 
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8787))
-    app.run(host="0.0.0.0", port=port)
+    import argparse
+
+    default_port = int(os.environ.get("PORT", 8787))
+    parser = argparse.ArgumentParser(description="Movie-py video builder HTTP server.")
+    parser.add_argument("--port", type=int, default=default_port, help="Port to listen on (default: %(default)s).")
+    parser.add_argument("--listen", type=str, default="0.0.0.0", help="Host/IP to listen on (default: %(default)s).")
+    args = parser.parse_args()
+    app.run(host=args.listen, port=args.port)

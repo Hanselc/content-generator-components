@@ -9,3 +9,4 @@ dependencies:
       - --extra-index-url https://download.pytorch.org/whl/cu130
       - -r ../tools/comfy-ui/requirements.txt
       - -r ../tools/comfy-ui/manager_requirements.txt
+      - matrix-nio

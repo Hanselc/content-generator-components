@@ -42,12 +42,12 @@ def _env_bool(name: str, default: bool) -> bool:
     return raw.strip().lower() in ("1", "true", "yes", "on")
 
 
-DEFAULT_CFG_VALUE = _env_float("VOXCPM_CFG_VALUE", 2.0)
+DEFAULT_CFG_VALUE = _env_float("VOXCPM_CFG_VALUE", 1.6)
 DEFAULT_INFERENCE_TIMESTEPS = _env_int("VOXCPM_INFERENCE_TIMESTEPS", 10)
-DEFAULT_NORMALIZE = False
+DEFAULT_NORMALIZE = _env_bool("VOXCPM_NORMALIZE", True)
 DEFAULT_MAX_LEN = _env_int("VOXCPM_MAX_LEN", 2000)
 DEFAULT_RETRY_BADCASE = _env_bool("VOXCPM_RETRY_BADCASE", False)
-MAX_SEGMENT_CHARS = _env_int("VOXCPM_MAX_SEGMENT_CHARS", 200)
+MAX_SEGMENT_CHARS = _env_int("VOXCPM_MAX_SEGMENT_CHARS", 800)
 
 _model = None
 _model_name = None
