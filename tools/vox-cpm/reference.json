@@ -1,6 +1,6 @@
 {
   "prompt_audio": "references/reference.wav",
-  "prompt_text": "Cierra los ojos, respira profundo y deja que tu mente se libere de las preocupaciones del día.",
+  "prompt_text": "Cierra los ojos, respira profundo y deja que tu mente se libere de las preocupaciones del día. Esta noche, el descanso será tu mejor compañía. Las estrellas ya brillan afuera, y la casa está en calma.",
   "reinforce_audio": "references/reference_reinforce.wav",
-  "reinforce_enabled": false
+  "reinforce_enabled": true
 }
