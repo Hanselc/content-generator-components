@@ -40,7 +40,17 @@ def resolve_input_folder(folder_name: str) -> str:
 
 @app.get("/health")
 def health():
-    return jsonify({"status": "ok"})
+    return jsonify({"status": "ok", "model_loaded": False})
+
+
+@app.post("/release")
+def release():
+    """No-op: movie-py is stateless (no GPU model to release).
+
+    Provided for API consistency with vox-cpm and z-image so callers can
+    call POST /release on any tool without checking which one it is.
+    """
+    return jsonify({"status": "released", "model_loaded": False})
 
 
 @app.post("/make-video")

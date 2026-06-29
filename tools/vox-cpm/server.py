@@ -20,6 +20,8 @@ from tts import (
     DEFAULT_MAX_GENERATE_LENGTH,
     DEFAULT_TEMPERATURE,
     generate_audio,
+    is_model_loaded,
+    teardown,
 )
 
 # Load .env from this script's directory.
@@ -116,7 +118,17 @@ def resolve_input_folder(folder_name: str) -> str:
 def health():
     if _STARTUP_ERROR is not None:
         return jsonify({"status": "error", "detail": _STARTUP_ERROR}), 500
-    return jsonify({"status": "ok"})
+    return jsonify({"status": "ok", "model_loaded": is_model_loaded()})
+
+
+@app.post("/release")
+def release_model():
+    """Release the loaded model and free GPU/CPU memory.
+
+    The model is lazy-loaded again on the next /make-audio request.
+    """
+    teardown()
+    return jsonify({"status": "released", "model_loaded": is_model_loaded()})
 
 
 @app.post("/make-audio")

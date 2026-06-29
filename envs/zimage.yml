@@ -1,0 +1,19 @@
+name: zimage
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip
+  - pip:
+      - --extra-index-url https://download.pytorch.org/whl/cu130
+      - torch>=2.5.0
+      - git+https://github.com/huggingface/diffusers
+      - transformers>=4.51.0
+      - accelerate
+      - safetensors
+      - pillow>=10
+      - huggingface_hub>=0.25.0
+      - flask>=3.0
+      - gunicorn>=21
+      - python-dotenv>=1.0
+      - numpy>=1.24

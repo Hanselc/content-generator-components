@@ -168,6 +168,11 @@ def _get_model(
     return _model
 
 
+def is_model_loaded() -> bool:
+    """Whether the Nano-vLLM server is currently loaded in memory."""
+    return _model is not None
+
+
 def teardown() -> None:
     """Stop the Nano-vLLM server and release CUDA memory."""
     global _model, _model_name, _prompt_id, _prompt_latents_fallback
