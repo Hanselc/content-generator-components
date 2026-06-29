@@ -15,8 +15,11 @@ stop_existing_by_port "$port"
 # Launch the service in its own process group so that signals can be
 # delivered to conda run -> bash -c -> python as a whole (conda run
 # does not forward TERM on its own).
+# NOTE: do NOT set PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True here —
+# it changes the CUDA allocator in a way that causes the Nano-vLLM warmup
+# forward pass to OOM on 8 GB GPUs. The reference project (run.py) does not
+# set it and works correctly.
 setsid stdbuf -oL -eL conda run -p "$env_prefix" --no-capture-output \
-    env PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
     bash -c "cd '$root/tools/vox-cpm' && exec python -u server.py --port $port --listen 0.0.0.0" &
 child=$!
 

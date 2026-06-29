@@ -1,14 +1,66 @@
-name: voxcpm
+# VoxCPM env (workspace-local prefix: .conda-envs/voxcpm).
+#
+# This env uses the Nano-vLLM-VoxCPM inference engine (nano-vllm-voxcpm), NOT
+# the `voxcpm` PyPI package. Nano-vLLM gives a streaming generator API with
+# prompt-pool conditioning and 48 kHz output.
+#
+# TWO-PHASE INSTALL — REQUIRED
+# ----------------------------
+# flash-attn (a transitive dep of nano-vllm-voxcpm) is sdist-only on PyPI and
+# does `import torch` at the top of its setup.py. With PEP 517 build isolation
+# (pip's default), the build env is a fresh temp venv with no torch, and the
+# build dies with `ModuleNotFoundError: No module named 'torch'`.
+#
+# We avoid the issue by:
+#   1) NOT installing nano-vllm-voxcpm in this yml (its dep flash-attn would
+#      be built in isolation, before torch is in the env).
+#   2) Setting PIP_NO_BUILD_ISOLATION=1 in the calling shell BEFORE running
+#      `pip install nano-vllm-voxcpm` in phase 2. This makes pip use the
+#      activated env (which has torch) as the build env, so flash-attn's
+#      `import torch` succeeds.
+#
+# PREREQUISITE — CUDA 12.6 TOOLKIT (one-time system install)
+# ---------------------------------------------------------
+# The cu126 torch wheel is built against the CUDA 12.6 toolkit. flash-attn
+# invokes the local nvcc and PyTorch checks that it matches
+# torch.version.cuda (12.6). Install the 12.6 toolkit to a separate prefix
+# (does NOT replace a system 13.x):
+#
+#   sudo sh /tmp/cuda-installer/cuda_12.6.3_560.35.05_linux.run \
+#     --silent --toolkit --installpath=/usr/local/cuda-12.6 \
+#     --no-opengl-libs --no-drm --no-man-page
+#   /usr/local/cuda-12.6/bin/nvcc --version   # must report 12.6.x
+#
+# setup.sh automates both phases. If running manually:
+#
+#   export PIP_NO_BUILD_ISOLATION=1 MAX_JOBS=4
+#   export CUDA_HOME=/usr/local/cuda-12.6
+#   export PATH=$CUDA_HOME/bin:$PATH
+#   Phase 1:  conda env create -p .conda-envs/voxcpm -f envs/voxcpm.yml
+#   Phase 2:  conda activate .conda-envs/voxcpm
+#             pip install nano-vllm-voxcpm
+#             python envs/scripts/apply_voxcpm_lowvram_patch.py .conda-envs/voxcpm
+#
+# MAX_JOBS=4 is a safety cap (higher can OOM the build on 32 GB hosts).
 channels:
+  - defaults
   - conda-forge
 dependencies:
-  - python=3.11
+  - python==3.11
   - pip
+  - ninja
   - pip:
-      - torch>=2.5.0
-      - voxcpm
+      - --extra-index-url https://download.pytorch.org/whl/cu126
+      - torch
+      - torchaudio
+      # Inference + audio
+      - soundfile
+      - huggingface_hub
+      # HTTP server
       - flask>=3.0
       - gunicorn>=21
-      - soundfile>=0.12
       - python-dotenv>=1.0
       - numpy>=1.24
+      # nano-vllm-voxcpm is installed in phase 2 (see top of file). Its
+      # transitive dep flash-attn is sdist-only and requires
+      # PIP_NO_BUILD_ISOLATION=1 to compile against the in-env torch.

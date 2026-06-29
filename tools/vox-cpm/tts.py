@@ -1,15 +1,34 @@
-"""Generate speech audio from text using VoxCPM Hi-Fi Cloning.
+"""Generate speech audio from text using Nano-vLLM-VoxCPM Hi-Fi Cloning.
 
 Core function: generate_audio(...)
 CLI: python tts.py "<text>" --name-prefix 0_ --output-folder /path/to/folder
 
-Uses the VoxCPM2 model with Hi-Fi Cloning: a reference audio clip and its
-exact transcript are provided so the model reproduces every vocal nuance.
+Uses the Nano-vLLM-VoxCPM engine with VoxCPM2 in Hi-Fi Cloning mode: a prompt
+audio clip and its exact transcript are encoded to latents and passed to
+server.generate(), optionally alongside a second reference clip's latents for
+extra timbre fidelity. Output is 48 kHz.
+
+This mirrors the inference flow of the reference project's VoxCPMProvider
+(src/tts_providers/voxcpm/provider.py):
+    snapshot_download -> VoxCPM.from_pretrained(model, devices,
+        max_num_batched_tokens, max_num_seqs, gpu_memory_utilization) ->
+    add_prompt(prompt_bytes, "wav", prompt_text)  [fallback: encode_latents] ->
+    encode_latents(reference_bytes, "wav") ->
+    iterate server.generate(target_text, prompt_id|prompt_latents, prompt_text,
+                            cfg_value, temperature, max_generate_length,
+                            ref_audio_latents) ->
+    np.concatenate(chunks) -> sf.write(wav, 48000) -> server.stop()
+
+NOTE: from_pretrained is called with ONLY the 4 kwargs the reference provider
+passes. inference_timesteps (10), max_model_len (4096), and enforce_eager
+(False) use the engine defaults — these defaults matter for the warmup peak /
+KV-cache allocation balance on 8 GB GPUs. Do not override them unless you
+understand the memory implications (see envs/voxcpm.yml header).
 """
 from __future__ import annotations
 
 import argparse
-import gc
+import atexit
 import json
 import os
 import re
@@ -20,6 +39,10 @@ from pathlib import Path
 import numpy as np
 import soundfile as sf
 
+
+# ---------------------------------------------------------------------------
+# Config (env-overridable, defaults match config.voxcpm.yaml + provider)
+# ---------------------------------------------------------------------------
 
 def _env_float(name: str, default: float) -> float:
     try:
@@ -35,45 +58,130 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
-def _env_bool(name: str, default: bool) -> bool:
-    raw = os.environ.get(name)
-    if raw is None:
-        return default
-    return raw.strip().lower() in ("1", "true", "yes", "on")
+# Engine init knobs (the 4 passed to from_pretrained, matching the reference).
+DEFAULT_GPU_MEMORY_UTILIZATION = _env_float("VOXCPM_GPU_MEMORY_UTILIZATION", 0.90)
+DEFAULT_MAX_NUM_SEQS = _env_int("VOXCPM_MAX_NUM_SEQS", 1)
+DEFAULT_MAX_NUM_BATCHED_TOKENS = _env_int("VOXCPM_MAX_NUM_BATCHED_TOKENS", 8192)
+DEFAULT_DEVICE = os.environ.get("VOXCPM_DEVICE", "cuda:0")
 
-
-DEFAULT_CFG_VALUE = _env_float("VOXCPM_CFG_VALUE", 1.6)
-DEFAULT_INFERENCE_TIMESTEPS = _env_int("VOXCPM_INFERENCE_TIMESTEPS", 10)
-DEFAULT_NORMALIZE = _env_bool("VOXCPM_NORMALIZE", True)
-DEFAULT_MAX_LEN = _env_int("VOXCPM_MAX_LEN", 2000)
-DEFAULT_RETRY_BADCASE = _env_bool("VOXCPM_RETRY_BADCASE", False)
+# Per-request generation knobs.
+DEFAULT_CFG_VALUE = _env_float("VOXCPM_CFG_VALUE", 2.0)
+DEFAULT_TEMPERATURE = _env_float("VOXCPM_TEMPERATURE", 1.0)
+DEFAULT_MAX_GENERATE_LENGTH = _env_int("VOXCPM_MAX_GENERATE_LENGTH", 2000)
 MAX_SEGMENT_CHARS = _env_int("VOXCPM_MAX_SEGMENT_CHARS", 800)
 
+# VoxCPM2 output sample rate (48 kHz, fixed by the model).
+SAMPLE_RATE = 48000
+
+
+# ---------------------------------------------------------------------------
+# Model singleton
+# ---------------------------------------------------------------------------
+
 _model = None
-_model_name = None
+_model_name: str | None = None
+_prompt_id: str | None = None
+_prompt_latents_fallback: bytes | None = None
+_ref_audio_latents: bytes | None = None
 
 
-def _get_model(model_name: str):
-    """Lazy-load and cache the VoxCPM model (singleton per process)."""
-    global _model, _model_name
-    if _model is None or _model_name != model_name:
-        from voxcpm import VoxCPM
+def _resolve_local_model(model: str) -> str:
+    """Resolve a HuggingFace repo id to a local directory.
 
-        device = os.environ.get("VOXCPM_DEVICE", "auto")
-        load_denoiser = _env_bool("VOXCPM_LOAD_DENOISER", False)
-        optimize = _env_bool("VOXCPM_OPTIMIZE", False)
-        _model = VoxCPM.from_pretrained(
-            model_name,
-            device=device,
-            load_denoiser=load_denoiser,
-            optimize=optimize,
-        )
-        _model_name = model_name
+    Nano-vLLM requires a local directory with *.safetensors files. If a repo
+    id is passed, download it via huggingface_hub.snapshot_download first.
+    """
+    p = Path(model).expanduser()
+    if p.is_dir():
+        return str(p)
+    from huggingface_hub import snapshot_download
+
+    return snapshot_download(repo_id=model)
+
+
+def _read_wav_bytes(wav_path: str) -> bytes:
+    with open(wav_path, "rb") as f:
+        return f.read()
+
+
+def _get_model(
+    model_name: str,
+    prompt_wav_path: str,
+    prompt_text: str,
+    reference_wav_path: str | None,
+):
+    """Lazy-load and cache the Nano-vLLM-VoxCPM server (singleton per process).
+
+    Matches the reference project's VoxCPMProvider.__init__ + _init_conditioning
+    exactly: from_pretrained receives only model/devices/max_num_batched_tokens/
+    max_num_seqs/gpu_memory_utilization (engine defaults for the rest), then
+    add_prompt is tried first with encode_latents as fallback, then the
+    optional reference clip is encoded to latents.
+
+    The first call wins; later calls reuse the existing server.
+    """
+    global _model, _model_name, _prompt_id, _prompt_latents_fallback
+    global _ref_audio_latents
+    if _model is not None and _model_name == model_name:
+        return _model
+
+    from nanovllm_voxcpm import VoxCPM as NanoVoxCPM
+
+    device = DEFAULT_DEVICE
+    if device == "auto":
+        import torch
+
+        device = "cuda:0" if torch.cuda.is_available() else "cpu"
+    gpu_index = int(device.split(":")[-1]) if device.startswith("cuda:") else 0
+
+    local_model_path = _resolve_local_model(model_name)
+
+    _model = NanoVoxCPM.from_pretrained(
+        model=local_model_path,
+        devices=[gpu_index],
+        max_num_batched_tokens=DEFAULT_MAX_NUM_BATCHED_TOKENS,
+        max_num_seqs=DEFAULT_MAX_NUM_SEQS,
+        gpu_memory_utilization=DEFAULT_GPU_MEMORY_UTILIZATION,
+    )
+    _model_name = model_name
+
+    # Pre-encode the prompt pair once (add_prompt first, encode_latents fallback).
+    prompt_bytes = _read_wav_bytes(prompt_wav_path)
+    try:
+        _prompt_id = _model.add_prompt(prompt_bytes, "wav", prompt_text)
+        _prompt_latents_fallback = None
+    except (AttributeError, NotImplementedError):
+        _prompt_id = None
+        _prompt_latents_fallback = _model.encode_latents(prompt_bytes, "wav")
+
+    # Optional reinforce/reference clip -> ref_audio_latents.
+    if reference_wav_path:
+        try:
+            ref_bytes = _read_wav_bytes(reference_wav_path)
+            _ref_audio_latents = _model.encode_latents(ref_bytes, "wav")
+        except Exception:
+            _ref_audio_latents = None
+    else:
+        _ref_audio_latents = None
+
+    atexit.register(teardown)
     return _model
 
 
-def _clear_cuda_cache():
-    """Release fragmented CUDA memory between generations."""
+def teardown() -> None:
+    """Stop the Nano-vLLM server and release CUDA memory."""
+    global _model, _model_name, _prompt_id, _prompt_latents_fallback
+    global _ref_audio_latents
+    if _model is not None:
+        try:
+            _model.stop()
+        except Exception:
+            pass
+        _model = None
+        _model_name = None
+        _prompt_id = None
+        _prompt_latents_fallback = None
+        _ref_audio_latents = None
     try:
         import torch
 
@@ -82,6 +190,10 @@ def _clear_cuda_cache():
     except Exception:
         pass
 
+
+# ---------------------------------------------------------------------------
+# Text splitting (preserved — segments long text for stable generation)
+# ---------------------------------------------------------------------------
 
 _SENTENCE_ENDS = ".!?。！？"
 _CLAUSE_ENDS = ",;:、，；："
@@ -207,6 +319,10 @@ def _split_text(text: str, max_chars: int = MAX_SEGMENT_CHARS) -> list[str]:
     return segments
 
 
+# ---------------------------------------------------------------------------
+# Generation
+# ---------------------------------------------------------------------------
+
 def generate_audio(
     text: str,
     prompt_wav_path: str,
@@ -215,33 +331,26 @@ def generate_audio(
     reference_wav_path: str | None = None,
     model_name: str = "openbmb/VoxCPM2",
     cfg_value: float = DEFAULT_CFG_VALUE,
-    inference_timesteps: int = DEFAULT_INFERENCE_TIMESTEPS,
-    normalize: bool = DEFAULT_NORMALIZE,
-    max_len: int = DEFAULT_MAX_LEN,
-    streaming: bool = False,
-    retry_badcase: bool = DEFAULT_RETRY_BADCASE,
+    temperature: float = DEFAULT_TEMPERATURE,
+    max_generate_length: int = DEFAULT_MAX_GENERATE_LENGTH,
 ) -> dict:
     """Synthesize speech with Hi-Fi Cloning and write a .wav file.
 
     prompt_wav_path + prompt_text provide the prompt pair (exact transcript)
     used for alignment/continuation. reference_wav_path provides a separate
-    clip that reinforces the timbre; if None, prompt_wav_path is reused.
+    clip that reinforces the timbre; if None, no ref_audio_latents are passed.
 
-    max_len caps the autoregressive token loop (lower = less VRAM).
-    streaming keeps a rolling patch window instead of accumulating all
-    generated patches (lowers peak VRAM for long outputs).
-    retry_badcase re-runs inference on abnormal outputs (disabling avoids
-    repeated peak-memory spikes).
+    The Nano-v-LMM server.generate() is a generator yielding numpy audio
+    chunks; we concatenate them per segment, then concatenate segments.
 
     Returns a dict with audio metadata:
       sample_rate, duration_seconds, file_size_bytes, model, mode, created_at
     """
     output_path = Path(output_path)
     prompt_wav_path = str(prompt_wav_path)
-    reference_wav_path = str(reference_wav_path) if reference_wav_path else prompt_wav_path
+    reference_wav_path = str(reference_wav_path) if reference_wav_path else None
 
-    model = _get_model(model_name)
-    sample_rate = model.tts_model.sample_rate
+    model = _get_model(model_name, prompt_wav_path, prompt_text, reference_wav_path)
 
     segments = _split_text(text)
     if not segments:
@@ -249,48 +358,39 @@ def generate_audio(
 
     all_wavs: list[np.ndarray] = []
     for seg in segments:
-        if streaming:
-            chunks: list[np.ndarray] = []
-            for chunk in model.generate_streaming(
-                text=seg,
-                prompt_wav_path=prompt_wav_path,
-                prompt_text=prompt_text,
-                reference_wav_path=reference_wav_path,
-                cfg_value=cfg_value,
-                inference_timesteps=inference_timesteps,
-                max_len=max_len,
-                normalize=normalize,
-                retry_badcase=retry_badcase,
-            ):
-                chunks.append(np.asarray(chunk, dtype=np.float32))
-            wav = np.concatenate(chunks) if chunks else np.zeros(0, dtype=np.float32)
+        kwargs: dict = dict(
+            target_text=seg,
+            cfg_value=cfg_value,
+            temperature=temperature,
+            max_generate_length=max_generate_length,
+        )
+        if _prompt_id is not None:
+            kwargs["prompt_id"] = _prompt_id
         else:
-            wav = model.generate(
-                text=seg,
-                prompt_wav_path=prompt_wav_path,
-                prompt_text=prompt_text,
-                reference_wav_path=reference_wav_path,
-                cfg_value=cfg_value,
-                inference_timesteps=inference_timesteps,
-                max_len=max_len,
-                normalize=normalize,
-                retry_badcase=retry_badcase,
-            )
-            wav = np.asarray(wav, dtype=np.float32)
+            kwargs["prompt_latents"] = _prompt_latents_fallback
+            kwargs["prompt_text"] = prompt_text
+        if _ref_audio_latents is not None:
+            kwargs["ref_audio_latents"] = _ref_audio_latents
+
+        chunks = [
+            np.asarray(chunk, dtype=np.float32)
+            for chunk in model.generate(**kwargs)
+        ]
+        if not chunks:
+            raise RuntimeError("VoxCPM produced no audio chunks for segment")
+        wav = np.concatenate(chunks, axis=0) if len(chunks) > 1 else chunks[0]
         all_wavs.append(wav)
-        _clear_cuda_cache()
 
     full_wav = np.concatenate(all_wavs) if len(all_wavs) > 1 else all_wavs[0]
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    sf.write(str(output_path), full_wav, sample_rate)
-    _clear_cuda_cache()
+    sf.write(str(output_path), full_wav, SAMPLE_RATE)
 
     file_size = output_path.stat().st_size
-    duration = len(full_wav) / float(sample_rate)
+    duration = len(full_wav) / float(SAMPLE_RATE)
 
     return {
-        "sample_rate": sample_rate,
+        "sample_rate": SAMPLE_RATE,
         "duration_seconds": round(duration, 3),
         "file_size_bytes": file_size,
         "model": model_name,
@@ -299,8 +399,14 @@ def generate_audio(
     }
 
 
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Generate speech via VoxCPM Hi-Fi Cloning.")
+    parser = argparse.ArgumentParser(
+        description="Generate speech via Nano-vLLM-VoxCPM Hi-Fi Cloning."
+    )
     parser.add_argument("text", help="Text to synthesize")
     parser.add_argument("--name-prefix", default="0_",
                         help="Filename prefix (e.g. '0_'). Default: '0_'")
@@ -312,17 +418,10 @@ def main(argv: list[str] | None = None) -> int:
                         help="Model name or local path")
     parser.add_argument("--cfg", type=float, default=DEFAULT_CFG_VALUE,
                         help=f"CFG value (default {DEFAULT_CFG_VALUE})")
-    parser.add_argument("--timesteps", type=int, default=DEFAULT_INFERENCE_TIMESTEPS,
-                        help=f"Inference timesteps (default {DEFAULT_INFERENCE_TIMESTEPS})")
-    parser.add_argument("--normalize", action="store_true",
-                        help="Enable text normalization")
-    parser.add_argument("--max-len", type=int, default=DEFAULT_MAX_LEN,
-                        help=f"Max generated audio tokens per segment (default {DEFAULT_MAX_LEN})")
-    parser.add_argument("--streaming", action="store_true",
-                        help="Use streaming generation (lower peak VRAM for long text)")
-    parser.add_argument("--no-retry-badcase", dest="retry_badcase",
-                        action="store_false", default=DEFAULT_RETRY_BADCASE,
-                        help="Disable bad-case retries (default: %s)" % DEFAULT_RETRY_BADCASE)
+    parser.add_argument("--temperature", type=float, default=DEFAULT_TEMPERATURE,
+                        help=f"Sampling temperature (default {DEFAULT_TEMPERATURE})")
+    parser.add_argument("--max-generate-length", type=int, default=DEFAULT_MAX_GENERATE_LENGTH,
+                        help=f"Max generated audio tokens per segment (default {DEFAULT_MAX_GENERATE_LENGTH})")
     args = parser.parse_args(argv)
 
     script_dir = Path(__file__).resolve().parent
@@ -367,11 +466,8 @@ def main(argv: list[str] | None = None) -> int:
             reference_wav_path=reference_wav_path,
             model_name=args.model,
             cfg_value=args.cfg,
-            inference_timesteps=args.timesteps,
-            normalize=args.normalize,
-            max_len=args.max_len,
-            streaming=args.streaming,
-            retry_badcase=args.retry_badcase,
+            temperature=args.temperature,
+            max_generate_length=args.max_generate_length,
         )
     except Exception as e:
         print(json.dumps({"error": str(e)}), file=sys.stderr)

@@ -1,28 +1,21 @@
-# comfy-ui: cloned fresh by setup.sh — only track workflows
-/tools/comfy-ui/*
-!/tools/comfy-ui/user/
-/tools/comfy-ui/user/*
-!/tools/comfy-ui/user/default/
-/tools/comfy-ui/user/default/*
+# comfy-ui: cloned fresh by setup.sh — only track user workflows
+/tools/comfy-ui/
 !/tools/comfy-ui/user/default/workflows/
 
-# movie-py local
-/tools/movie-py/.env
-/tools/movie-py/examples/
-
-# vox-cpm local
-/tools/vox-cpm/.env
-/tools/vox-cpm/examples/
+# Conda workspace envs (created by setup.sh, not versioned)
+.conda-envs/
 
 # Python
 __pycache__/
 *.py[cod]
-*.pyc
 .venv/
 venv*/
 
-# Conda workspace envs (created by setup.sh, not versioned)
-.conda-envs/
+# Env files
+.env
+
+# Local output / examples
+examples/
 
 # OS / editors
 .DS_Store

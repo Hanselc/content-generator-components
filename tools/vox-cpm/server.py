@@ -17,10 +17,8 @@ from flask import Flask, jsonify, request
 
 from tts import (
     DEFAULT_CFG_VALUE,
-    DEFAULT_INFERENCE_TIMESTEPS,
-    DEFAULT_MAX_LEN,
-    DEFAULT_NORMALIZE,
-    DEFAULT_RETRY_BADCASE,
+    DEFAULT_MAX_GENERATE_LENGTH,
+    DEFAULT_TEMPERATURE,
     generate_audio,
 )
 
@@ -147,11 +145,8 @@ def make_audio():
         return jsonify({"error": f"input_folder does not exist: {input_folder}"}), 404
 
     cfg_value = float(data.get("cfg_value", DEFAULT_CFG_VALUE))
-    inference_timesteps = int(data.get("inference_timesteps", DEFAULT_INFERENCE_TIMESTEPS))
-    normalize = bool(data.get("normalize", DEFAULT_NORMALIZE))
-    max_len = int(data.get("max_len", DEFAULT_MAX_LEN))
-    streaming = bool(data.get("streaming", False))
-    retry_badcase = bool(data.get("retry_badcase", DEFAULT_RETRY_BADCASE))
+    temperature = float(data.get("temperature", DEFAULT_TEMPERATURE))
+    max_generate_length = int(data.get("max_generate_length", DEFAULT_MAX_GENERATE_LENGTH))
 
     hhmmss = datetime.now().strftime("%H%M%S")
     filename = f"{name_prefix}{hhmmss}.wav"
@@ -166,11 +161,8 @@ def make_audio():
             output_path=output_path,
             model_name=MODEL_NAME,
             cfg_value=cfg_value,
-            inference_timesteps=inference_timesteps,
-            normalize=normalize,
-            max_len=max_len,
-            streaming=streaming,
-            retry_badcase=retry_badcase,
+            temperature=temperature,
+            max_generate_length=max_generate_length,
         )
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
