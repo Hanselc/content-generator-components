@@ -75,14 +75,21 @@ SAMPLE_RATE = 48000
 
 
 # ---------------------------------------------------------------------------
-# Model singleton
+# Model cache (single active voice, keyed by reference_id)
 # ---------------------------------------------------------------------------
 
-_model = None
-_model_name: str | None = None
-_prompt_id: str | None = None
-_prompt_latents_fallback: bytes | None = None
-_ref_audio_latents: bytes | None = None
+# The cache holds at most one loaded voice at a time. Switching reference_id
+# tears down the current model and loads the new voice. The model itself is
+# always the same (MODEL_NAME from .env); only the encoded prompt/reference
+# latents differ per voice.
+_cache: dict = {
+    "reference_id": None,
+    "model": None,
+    "model_name": None,
+    "prompt_id": None,
+    "prompt_latents_fallback": None,
+    "ref_audio_latents": None,
+}
 
 
 def _resolve_local_model(model: str) -> str:
@@ -120,21 +127,23 @@ def _get_model(
     prompt_wav_path: str,
     prompt_text: str,
     reference_wav_path: str | None,
+    reference_id: str,
 ):
-    """Lazy-load and cache the Nano-vLLM-VoxCPM server (singleton per process).
+    """Lazy-load and cache the Nano-vLLM-VoxCPM server keyed by reference_id.
 
-    Matches the reference project's VoxCPMProvider.__init__ + _init_conditioning
-    exactly: from_pretrained receives only model/devices/max_num_batched_tokens/
-    max_num_seqs/gpu_memory_utilization (engine defaults for the rest), then
-    add_prompt is tried first with encode_latents as fallback, then the
-    optional reference clip is encoded to latents.
-
-    The first call wins; later calls reuse the existing server.
+    Only one voice is loaded at a time. If reference_id differs from the
+    currently cached one, the existing model is torn down (VRAM freed) before
+    loading the new voice. Matches the reference project's VoxCPMProvider
+    conditioning flow: from_pretrained receives only model/devices/
+    max_num_batched_tokens/max_num_seqs/gpu_memory_utilization (engine defaults
+    for the rest), then add_prompt is tried first with encode_latents as
+    fallback, then the optional reference clip is encoded to latents.
     """
-    global _model, _model_name, _prompt_id, _prompt_latents_fallback
-    global _ref_audio_latents
-    if _model is not None and _model_name == model_name:
-        return _model
+    if _cache["model"] is not None and _cache["reference_id"] == reference_id:
+        return _cache["model"]
+
+    if _cache["model"] is not None:
+        teardown()
 
     from nanovllm_voxcpm import VoxCPM as NanoVoxCPM
 
@@ -148,25 +157,27 @@ def _get_model(
     local_model_path = _resolve_local_model(model_name)
 
     print(f"[voxcpm] Loading model: {model_name} (device={device}) ...", flush=True)
-    _model = NanoVoxCPM.from_pretrained(
+    model = NanoVoxCPM.from_pretrained(
         model=local_model_path,
         devices=[gpu_index],
         max_num_batched_tokens=DEFAULT_MAX_NUM_BATCHED_TOKENS,
         max_num_seqs=DEFAULT_MAX_NUM_SEQS,
         gpu_memory_utilization=DEFAULT_GPU_MEMORY_UTILIZATION,
     )
-    _model_name = model_name
+    _cache["model"] = model
+    _cache["model_name"] = model_name
+    _cache["reference_id"] = reference_id
 
     # Pre-encode the prompt pair once (add_prompt first, encode_latents fallback).
     prompt_bytes = _read_wav_bytes(prompt_wav_path)
     prompt_dur = _wav_duration_seconds(prompt_wav_path)
     print(f"[voxcpm] Encoding prompt ({prompt_dur:.1f}s) ...", flush=True)
     try:
-        _prompt_id = _model.add_prompt(prompt_bytes, "wav", prompt_text)
-        _prompt_latents_fallback = None
+        _cache["prompt_id"] = model.add_prompt(prompt_bytes, "wav", prompt_text)
+        _cache["prompt_latents_fallback"] = None
     except (AttributeError, NotImplementedError):
-        _prompt_id = None
-        _prompt_latents_fallback = _model.encode_latents(prompt_bytes, "wav")
+        _cache["prompt_id"] = None
+        _cache["prompt_latents_fallback"] = model.encode_latents(prompt_bytes, "wav")
 
     # Optional reinforce/reference clip -> ref_audio_latents.
     if reference_wav_path:
@@ -174,36 +185,35 @@ def _get_model(
         print(f"[voxcpm] Encoding reference ({ref_dur:.1f}s) ...", flush=True)
         try:
             ref_bytes = _read_wav_bytes(reference_wav_path)
-            _ref_audio_latents = _model.encode_latents(ref_bytes, "wav")
+            _cache["ref_audio_latents"] = model.encode_latents(ref_bytes, "wav")
         except Exception:
-            _ref_audio_latents = None
+            _cache["ref_audio_latents"] = None
     else:
-        _ref_audio_latents = None
+        _cache["ref_audio_latents"] = None
 
     print("[voxcpm] Model ready.", flush=True)
     atexit.register(teardown)
-    return _model
+    return model
 
 
 def is_model_loaded() -> bool:
     """Whether the Nano-vLLM server is currently loaded in memory."""
-    return _model is not None
+    return _cache["model"] is not None
 
 
 def teardown() -> None:
     """Stop the Nano-vLLM server and release CUDA memory."""
-    global _model, _model_name, _prompt_id, _prompt_latents_fallback
-    global _ref_audio_latents
-    if _model is not None:
+    if _cache["model"] is not None:
         try:
-            _model.stop()
+            _cache["model"].stop()
         except Exception:
             pass
-        _model = None
-        _model_name = None
-        _prompt_id = None
-        _prompt_latents_fallback = None
-        _ref_audio_latents = None
+    _cache["model"] = None
+    _cache["model_name"] = None
+    _cache["reference_id"] = None
+    _cache["prompt_id"] = None
+    _cache["prompt_latents_fallback"] = None
+    _cache["ref_audio_latents"] = None
     try:
         import torch
 
@@ -355,12 +365,15 @@ def generate_audio(
     cfg_value: float = DEFAULT_CFG_VALUE,
     temperature: float = DEFAULT_TEMPERATURE,
     max_generate_length: int = DEFAULT_MAX_GENERATE_LENGTH,
+    reference_id: str = "default",
 ) -> dict:
     """Synthesize speech with Hi-Fi Cloning and write a .wav file.
 
     prompt_wav_path + prompt_text provide the prompt pair (exact transcript)
     used for alignment/continuation. reference_wav_path provides a separate
     clip that reinforces the timbre; if None, no ref_audio_latents are passed.
+    reference_id identifies which voice's latents are cached; switching it
+    tears down and reloads the model.
 
     The Nano-v-LMM server.generate() is a generator yielding numpy audio
     chunks; we concatenate them per segment, then concatenate segments.
@@ -372,7 +385,13 @@ def generate_audio(
     prompt_wav_path = str(prompt_wav_path)
     reference_wav_path = str(reference_wav_path) if reference_wav_path else None
 
-    model = _get_model(model_name, prompt_wav_path, prompt_text, reference_wav_path)
+    model = _get_model(
+        model_name,
+        prompt_wav_path,
+        prompt_text,
+        reference_wav_path,
+        reference_id,
+    )
 
     segments = _split_text(text)
     if not segments:
@@ -388,13 +407,13 @@ def generate_audio(
             temperature=temperature,
             max_generate_length=max_generate_length,
         )
-        if _prompt_id is not None:
-            kwargs["prompt_id"] = _prompt_id
+        if _cache["prompt_id"] is not None:
+            kwargs["prompt_id"] = _cache["prompt_id"]
         else:
-            kwargs["prompt_latents"] = _prompt_latents_fallback
+            kwargs["prompt_latents"] = _cache["prompt_latents_fallback"]
             kwargs["prompt_text"] = prompt_text
-        if _ref_audio_latents is not None:
-            kwargs["ref_audio_latents"] = _ref_audio_latents
+        if _cache["ref_audio_latents"] is not None:
+            kwargs["ref_audio_latents"] = _cache["ref_audio_latents"]
 
         chunks = [
             np.asarray(chunk, dtype=np.float32)
@@ -438,12 +457,12 @@ def main(argv: list[str] | None = None) -> int:
         description="Generate speech via Nano-vLLM-VoxCPM Hi-Fi Cloning."
     )
     parser.add_argument("text", help="Text to synthesize")
-    parser.add_argument("--name-prefix", default="0_",
-                        help="Filename prefix (e.g. '0_'). Default: '0_'")
-    parser.add_argument("--output-folder", required=True,
-                        help="Folder to write the generated .wav into")
+    parser.add_argument("--output-path", required=True,
+                        help="Absolute path of the .wav file to write")
+    parser.add_argument("--reference-id", default="default",
+                        help="referenceId (a subfolder of references/). Default: 'default'")
     parser.add_argument("--reference-json", default=None,
-                        help="Path to reference.json (default: <script dir>/reference.json)")
+                        help="Path to reference.json (overrides --reference-id resolution)")
     parser.add_argument("--model", default="openbmb/VoxCPM2",
                         help="Model name or local path")
     parser.add_argument("--cfg", type=float, default=DEFAULT_CFG_VALUE,
@@ -454,8 +473,18 @@ def main(argv: list[str] | None = None) -> int:
                         help=f"Max generated audio tokens per segment (default {DEFAULT_MAX_GENERATE_LENGTH})")
     args = parser.parse_args(argv)
 
+    output_path = Path(args.output_path).resolve()
+    if not output_path.is_absolute():
+        print(json.dumps({"error": "--output-path must be an absolute path"}), file=sys.stderr)
+        return 1
+
     script_dir = Path(__file__).resolve().parent
-    ref_path = Path(args.reference_json) if args.reference_json else script_dir / "reference.json"
+    if args.reference_json:
+        ref_path = Path(args.reference_json).resolve()
+        ref_dir = ref_path.parent
+    else:
+        ref_dir = (script_dir / "references" / args.reference_id).resolve()
+        ref_path = ref_dir / "reference.json"
     if not ref_path.is_file():
         print(json.dumps({"error": f"reference.json not found: {ref_path}"}), file=sys.stderr)
         return 1
@@ -465,7 +494,7 @@ def main(argv: list[str] | None = None) -> int:
     if not prompt_audio_rel or not prompt_text:
         print(json.dumps({"error": "reference.json must contain 'prompt_audio' and 'prompt_text'"}), file=sys.stderr)
         return 1
-    prompt_wav = (script_dir / prompt_audio_rel).resolve()
+    prompt_wav = (ref_dir / prompt_audio_rel).resolve()
     if not prompt_wav.is_file():
         print(json.dumps({"error": f"prompt audio not found: {prompt_wav}"}), file=sys.stderr)
         return 1
@@ -477,15 +506,11 @@ def main(argv: list[str] | None = None) -> int:
         if not reinforce_audio_rel:
             print(json.dumps({"error": "reference.json: 'reinforce_audio' required when reinforce_enabled is true"}), file=sys.stderr)
             return 1
-        reinforce_wav = (script_dir / reinforce_audio_rel).resolve()
+        reinforce_wav = (ref_dir / reinforce_audio_rel).resolve()
         if not reinforce_wav.is_file():
             print(json.dumps({"error": f"reinforce audio not found: {reinforce_wav}"}), file=sys.stderr)
             return 1
         reference_wav_path = str(reinforce_wav)
-
-    hhmmss = datetime.now().strftime("%H%M%S")
-    filename = f"{args.name_prefix}{hhmmss}.wav"
-    output_path = Path(args.output_folder).resolve() / filename
 
     try:
         result = generate_audio(
@@ -498,12 +523,13 @@ def main(argv: list[str] | None = None) -> int:
             cfg_value=args.cfg,
             temperature=args.temperature,
             max_generate_length=args.max_generate_length,
+            reference_id=args.reference_id,
         )
     except Exception as e:
         print(json.dumps({"error": str(e)}), file=sys.stderr)
         return 1
 
-    print(json.dumps({"audio_path": filename, "metadata": result}, indent=2))
+    print(json.dumps({"audio_path": str(output_path), "metadata": result}, indent=2))
     return 0
 
 

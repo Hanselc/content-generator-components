@@ -5,16 +5,24 @@ CLI: python make_video.py <input_folder> [--display 5] [--transition 1]
 
 Requires a movie.json file alongside the images:
     {
-      "title": "My Video Title",
+      "title": {"text": "My Video Title", "audio": "intro.mp3"},
       "images": [
         {"image": "0_134526.png", "text": "Caption for image 0", "audio": "0.mp3"},
         {"image": "1_134603.png", "text": "Caption for image 1", "audio": ""}
       ]
     }
 
-Each slide's duration equals its audio file's duration. Slides without audio
-fall back to --display seconds (default 5). A 10s silent Voronoi intro precedes
-the slides. `audio` is optional; empty string or missing means no audio.
+`title` may be a string (no intro audio) or an object with `text` (required)
+and `audio` (optional, resolved against the input folder). When `title.audio`
+is present, the intro clip's duration equals that audio's duration and the
+audio is attached to the intro; otherwise the intro is a silent 10s Voronoi
+composition.
+
+Each slide's duration equals its audio file's duration plus silent padding;
+slides without audio use --display seconds. `transition_seconds` of silence is
+inserted before and after every clip's audio so that consecutive audios never
+overlap (the visual crossfade happens during the silent tails). `audio` is
+optional; empty string or missing means no audio.
 """
 from __future__ import annotations
 
@@ -60,14 +68,20 @@ class MovieSpecError(ValueError):
     pass
 
 
-def load_movie(input_folder: Path) -> tuple[str, list[dict]]:
-    """Load and validate movie.json. Returns (title, images_entries).
+def load_movie(input_folder: Path) -> tuple[dict, list[dict]]:
+    """Load and validate movie.json. Returns (title_spec, images_entries).
+
+    `title_spec` is a dict: {"text": <str>, "audio": <Path or None>}.
 
     Each entry: {"image": <name>, "text": <str or None>,
                  "audio": <Path or None>, "path": <Path>}.
 
     `image` is required. `text` and `audio` are optional. `audio` resolves
     against input_folder; empty/missing means no audio (uses fallback duration).
+
+    `title` in movie.json may be a plain string (no intro audio) or an object
+    {"text": <str>, "audio": <name>} where `audio` is optional and resolves
+    against input_folder.
     """
     meta_path = input_folder / "movie.json"
     if not meta_path.is_file():
@@ -80,9 +94,38 @@ def load_movie(input_folder: Path) -> tuple[str, list[dict]]:
 
     if not isinstance(data, dict):
         raise MovieSpecError("movie.json top-level must be an object")
-    title = data.get("title")
-    if not isinstance(title, str) or not title.strip():
-        raise MovieSpecError("movie.json: 'title' is required and must be a non-empty string")
+
+    raw_title = data.get("title")
+    if raw_title is None:
+        raise MovieSpecError("movie.json: 'title' is required")
+    if isinstance(raw_title, str):
+        if not raw_title.strip():
+            raise MovieSpecError("movie.json: 'title' must be a non-empty string")
+        title_text = raw_title
+        title_audio_name: str = ""
+    elif isinstance(raw_title, dict):
+        title_text = raw_title.get("text")
+        if not isinstance(title_text, str) or not title_text.strip():
+            raise MovieSpecError(
+                "movie.json: 'title.text' is required and must be a non-empty string")
+        ta = raw_title.get("audio", "")
+        if ta is None:
+            ta = ""
+        if not isinstance(ta, str):
+            raise MovieSpecError("movie.json: 'title.audio' must be a string if present")
+        title_audio_name = ta
+    else:
+        raise MovieSpecError(
+            "movie.json: 'title' must be a string or an object {text, audio}")
+
+    title_audio_path: Path | None = None
+    if title_audio_name:
+        title_audio_path = input_folder / title_audio_name
+        if not title_audio_path.is_file():
+            raise MovieSpecError(
+                f"movie.json: title.audio '{title_audio_name}' not found in folder")
+
+    title_spec = {"text": title_text, "audio": title_audio_path}
 
     entries = data.get("images")
     if not isinstance(entries, list) or len(entries) < 2:
@@ -127,7 +170,7 @@ def load_movie(input_folder: Path) -> tuple[str, list[dict]]:
             f"movie.json lists {len(norm_entries)} images but folder has "
             f"{len(image_files)} supported image files")
 
-    return title, norm_entries
+    return title_spec, norm_entries
 
 
 def load_font(size: int) -> ImageFont.FreeTypeFont:
@@ -153,6 +196,46 @@ def load_normalized(image_path: Path, target_w: int, target_h: int) -> np.ndarra
     canvas = Image.new("RGB", (target_w, target_h), (0, 0, 0))
     canvas.paste(resized, ((target_w - new_w) // 2, (target_h - new_h) // 2))
     return np.array(canvas)
+
+
+def silent_audio_clip(duration: float, fps: int = 44100, nchannels: int = 2):
+    """Return a silent AudioClip of the given duration."""
+    from moviepy import AudioClip
+    import numpy as _np
+
+    if nchannels > 1:
+        def make_frame(t):
+            if isinstance(t, _np.ndarray):
+                return _np.zeros((len(t), nchannels))
+            return _np.zeros(nchannels)
+    else:
+        def make_frame(t):
+            if isinstance(t, _np.ndarray):
+                return _np.zeros(len(t))
+            return 0.0
+
+    return AudioClip(make_frame, duration=duration, fps=fps)
+
+
+def padded_audio(audio_clip, pad_seconds: float):
+    """Wrap `audio_clip` in `pad_seconds` of silence on both sides.
+
+    Returns a CompositeAudioClip of total duration `audio_clip.duration +
+    2*pad_seconds` with the original audio starting at `pad_seconds` and
+    `pad_seconds` of silence after it ends.
+    """
+    from moviepy import CompositeAudioClip
+
+    fps = audio_clip.fps or 44100
+    nch = audio_clip.nchannels if hasattr(audio_clip, "nchannels") else 2
+    pad_before = silent_audio_clip(pad_seconds, fps=fps, nchannels=nch)
+    pad_after = silent_audio_clip(pad_seconds, fps=fps, nchannels=nch)
+    audio_dur = float(audio_clip.duration)
+    return CompositeAudioClip([
+        pad_before,
+        audio_clip.with_start(pad_seconds),
+        pad_after.with_start(pad_seconds + audio_dur),
+    ])
 
 
 def render_title_overlay(size: tuple[int, int], title: str) -> Image.Image:
@@ -289,14 +372,18 @@ def balanced_shards(w: int, h: int, rng: np.random.Generator) -> list[list[tuple
 
 def build_composition_clip(
     image_paths: list[Path],
-    title: str,
+    title: dict,
     target_w: int,
     target_h: int,
     duration: float,
     rng: np.random.Generator,
 ):
-    """Build the 10s opening composition: 3 balanced shards with Ken Burns
-    animation, black gradient borders, and the title overlay."""
+    """Build the opening composition: 3 balanced shards with Ken Burns
+    animation, black gradient borders, and the title overlay.
+
+    `title` is a dict {"text": <str>, "audio": <Path or None>}; only `text` is
+    used here (audio is attached by the caller). `duration` controls the clip
+    length and the Ken Burns progress interpolation."""
     from moviepy import VideoClip
 
     shards = balanced_shards(target_w, target_h, rng)
@@ -357,7 +444,7 @@ def build_composition_clip(
             "pan_x1": pan_x1, "pan_y1": pan_y1,
         })
 
-    title_alpha = render_title_overlay((target_w, target_h), title)
+    title_alpha = render_title_overlay((target_w, target_h), title["text"])
 
     def make_frame(t: float) -> np.ndarray:
         progress = (t / duration) if duration > 0 else 0.0
@@ -436,7 +523,15 @@ def build_video(
     display_seconds: float = DEFAULT_DISPLAY,
     transition_seconds: float = DEFAULT_TRANSITION,
 ) -> dict:
-    """Build a slideshow video with a 10s Voronoi intro + captioned images.
+    """Build a slideshow video with an opening composition + captioned images.
+
+    The intro clip's duration is the title audio's duration (if present) plus
+    `transition_seconds` of silent padding on each side; otherwise it falls
+    back to INTRO_SECONDS. Each slide's clip duration is its audio duration
+    (or --display when no audio) plus `transition_seconds` of silence on each
+    side, so consecutive audios are separated by `transition_seconds` of clean
+    silence and never overlap (the visual crossfade happens during the silent
+    tails).
 
     Returns a dict with:
       video_path:  relative path "output/<timestamp>.mp4"
@@ -461,18 +556,36 @@ def build_video(
 
     rng = np.random.default_rng(1234)
 
-    # 1. Intro composition clip (INTRO_SECONDS).
-    print(f"[movie-py] Building intro composition ({INTRO_SECONDS}s) ...", flush=True)
-    intro_clip = build_composition_clip(
-        image_paths, title, target_w, target_h, INTRO_SECONDS, rng)
+    # 1. Intro composition clip.
+    #    Duration = title_audio.duration + 2*transition (silence-padded) when
+    #    title audio is present; otherwise the silent INTRO_SECONDS default.
+    intro_audio_clips: list = []
+    if title.get("audio") is not None:
+        title_audio = AudioFileClip(str(title["audio"]))
+        intro_audio_clips.append(title_audio)
+        intro_padded_audio = padded_audio(title_audio, transition_seconds)
+        intro_duration = float(intro_padded_audio.duration)
+        print(f"[movie-py] Building intro composition ({intro_duration:.1f}s, "
+              f"title audio {title_audio.duration:.1f}s) ...", flush=True)
+    else:
+        intro_padded_audio = None
+        intro_duration = float(INTRO_SECONDS)
+        print(f"[movie-py] Building intro composition ({intro_duration:.1f}s, "
+              f"silent) ...", flush=True)
 
-    # 2. Per-image clips with captions, crossfades between consecutive clips.
-    #    Slide duration = audio duration if present, else display_seconds.
+    intro_clip = build_composition_clip(
+        image_paths, title, target_w, target_h, intro_duration, rng)
+    if intro_padded_audio is not None:
+        intro_clip = intro_clip.with_audio(intro_padded_audio)
+
+    # 2. Per-image clips with captions and silence-padded audio.
+    #    Clip duration = audio duration (or --display) + 2*transition_seconds.
     from tqdm import tqdm
 
     image_clips: list = []
     durations: list[float] = []
     audio_clips: list = []
+    pad = float(transition_seconds)
     for e in tqdm(entries, desc="Preparing slides", unit="slide"):
         arr = load_normalized(e["path"], target_w, target_h)
         text = e.get("text")
@@ -481,20 +594,26 @@ def build_video(
         if e.get("audio") is not None:
             a = AudioFileClip(str(e["audio"]))
             audio_clips.append(a)
-            dur = float(a.duration)
-            clip = ImageClip(arr).with_duration(dur).with_audio(a)
+            padded = padded_audio(a, pad)
+            dur = float(padded.duration)
+            clip = ImageClip(arr).with_duration(dur).with_audio(padded)
         else:
-            dur = float(display_seconds)
+            dur = float(display_seconds) + 2 * pad
             clip = ImageClip(arr).with_duration(dur)
         image_clips.append(clip)
         durations.append(dur)
 
     # Assemble timeline: intro + image_clips with crossfades.
-    # intro starts at 0; first image starts at (INTRO_SECONDS - transition) so it
-    # crossfades over the tail of the intro; subsequent images step by
+    # intro starts at 0; first image starts at (intro_duration - transition) so
+    # it crossfades over the tail of the intro; subsequent images step by
     # (prev_duration - transition_seconds).
+    #
+    # Because each clip's duration includes 2*transition of silent padding
+    # around its audio, the next clip's audio starts exactly transition_seconds
+    # after the previous clip's audio ends -- no audio overlap, and the visual
+    # crossfade happens entirely within the silent tails.
     intro_clip = intro_clip.with_start(0)
-    start = INTRO_SECONDS - transition_seconds
+    start = intro_duration - transition_seconds
     for i, clip in enumerate(image_clips):
         clip = clip.with_start(start)
         clip = clip.with_effects([CrossFadeIn(transition_seconds)])
@@ -525,7 +644,7 @@ def build_video(
         logger="bar",
     )
 
-    for c in [intro_clip] + image_clips + audio_clips:
+    for c in [intro_clip] + image_clips + audio_clips + intro_audio_clips:
         try:
             c.close()
         except Exception:
@@ -549,8 +668,11 @@ def build_video(
             "fps": FPS,
             "resolution": f"{target_w}x{target_h}",
             "image_count": len(image_clips),
-            "intro_seconds": INTRO_SECONDS,
-            "title": title,
+            "intro_seconds": round(intro_duration, 3),
+            "title": title["text"],
+            "title_audio": title["audio"].name if title.get("audio") else None,
+            "transition_seconds": transition_seconds,
+            "display_seconds": display_seconds,
             "codec": "h264",
             "file_size_bytes": file_size,
             "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
