@@ -47,8 +47,8 @@ def health():
 def release():
     """No-op: movie-py is stateless (no GPU model to release).
 
-    Provided for API consistency with vox-cpm and z-image so callers can
-    call POST /release on any tool without checking which one it is.
+    Provided for API consistency across tools so callers can call
+    POST /release on any tool without checking which one it is.
     """
     return jsonify({"status": "released", "model_loaded": False})
 

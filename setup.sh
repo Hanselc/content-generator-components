@@ -24,7 +24,7 @@ conda activate base 2>/dev/null || source "$(conda info --base)/etc/profile.d/co
 voxcpm_prefix="$root/.conda-envs/voxcpm"
 voxcpm_created=false
 
-for env in comfyui moviepy voxcpm zimage; do
+for env in comfyui moviepy voxcpm; do
     prefix="$root/.conda-envs/$env"
     if [ ! -d "$prefix" ]; then
         echo "Creating conda env '$env' at $prefix ..."
