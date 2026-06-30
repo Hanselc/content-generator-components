@@ -1,37 +1,30 @@
-"""Build a slideshow video from images in a folder.
+"""Reusable primitives for building slideshow-style movies.
 
-Core function: build_video(input_folder, display_seconds, transition_seconds)
-CLI: python make_video.py <input_folder> [--display 5] [--transition 1]
+This module is a library: it exposes the rendering/composition helpers
+(load_normalized, padded_audio, build_composition_clip, render_caption_overlay,
+overlay_caption_on_array, silent_audio_clip, balanced_shards, load_font,
+load_movie) plus a final assembler (assemble) that writes the composite to
+disk and returns a section-aware result dict with time marks.
 
-Requires a movie.json file alongside the images:
-    {
-      "title": {"text": "My Video Title", "audio": "intro.mp3"},
-      "images": [
-        {"image": "0_134526.png", "text": "Caption for image 0", "audio": "0.mp3"},
-        {"image": "1_134603.png", "text": "Caption for image 1", "audio": ""}
-      ]
-    }
+Per-script construction logic lives in tools/movie-py/scripts/<scriptId>/script.py
+modules which import this library and compose the primitives.
 
-`title` may be a string (no intro audio) or an object with `text` (required)
-and `audio` (optional, resolved against the input folder). When `title.audio`
-is present, the intro clip's duration equals that audio's duration and the
-audio is attached to the intro; otherwise the intro is a silent 10s Voronoi
-composition.
+load_movie(spec_path, input_folder)
+    Load and validate a movie.json-style spec from an explicit `spec_path`
+    (absolute), resolving image/audio filenames against `input_folder`.
 
-Each slide's duration equals its audio file's duration plus silent padding;
-slides without audio use --display seconds. `transition_seconds` of silence is
-inserted before and after every clip's audio so that consecutive audios never
-overlap (the visual crossfade happens during the silent tails). `audio` is
-optional; empty string or missing means no audio.
+assemble(composite_clips, sections_meta, output_folder, target_size, ...)
+    Write the final composite video to `output_folder/<timestamp>.mp4` and
+    return a dict containing `video_path`, `sections` (with per-section time
+    marks: start_seconds/end_seconds/duration_seconds + wall-clock
+    started_at/finished_at), `total_duration_seconds`, `started_at`,
+    `finished_at`, and `metadata`.
 """
 from __future__ import annotations
 
-import argparse
 import json
-import math
 import os
 import re
-import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -68,8 +61,14 @@ class MovieSpecError(ValueError):
     pass
 
 
-def load_movie(input_folder: Path) -> tuple[dict, list[dict]]:
-    """Load and validate movie.json. Returns (title_spec, images_entries).
+def load_movie(spec_path: Path, input_folder: Path) -> tuple[dict, list[dict]]:
+    """Load and validate a movie.json-style spec from an explicit `spec_path`.
+
+    `spec_path` is the absolute path to the JSON spec file (e.g. movie.json).
+    `input_folder` is the absolute path to the folder containing the image and
+    audio assets referenced by filename inside the spec.
+
+    Returns (title_spec, images_entries).
 
     `title_spec` is a dict: {"text": <str>, "audio": <Path or None>}.
 
@@ -79,13 +78,13 @@ def load_movie(input_folder: Path) -> tuple[dict, list[dict]]:
     `image` is required. `text` and `audio` are optional. `audio` resolves
     against input_folder; empty/missing means no audio (uses fallback duration).
 
-    `title` in movie.json may be a plain string (no intro audio) or an object
+    `title` in the spec may be a plain string (no intro audio) or an object
     {"text": <str>, "audio": <name>} where `audio` is optional and resolves
     against input_folder.
     """
-    meta_path = input_folder / "movie.json"
+    meta_path = Path(spec_path)
     if not meta_path.is_file():
-        raise MovieSpecError(f"required file missing: {meta_path}")
+        raise MovieSpecError(f"required spec file missing: {meta_path}")
 
     try:
         data = json.loads(meta_path.read_text(encoding="utf-8"))
@@ -93,43 +92,43 @@ def load_movie(input_folder: Path) -> tuple[dict, list[dict]]:
         raise MovieSpecError(f"invalid JSON in {meta_path}: {e}") from e
 
     if not isinstance(data, dict):
-        raise MovieSpecError("movie.json top-level must be an object")
+        raise MovieSpecError("spec top-level must be an object")
 
     raw_title = data.get("title")
     if raw_title is None:
-        raise MovieSpecError("movie.json: 'title' is required")
+        raise MovieSpecError("spec: 'title' is required")
     if isinstance(raw_title, str):
         if not raw_title.strip():
-            raise MovieSpecError("movie.json: 'title' must be a non-empty string")
+            raise MovieSpecError("spec: 'title' must be a non-empty string")
         title_text = raw_title
         title_audio_name: str = ""
     elif isinstance(raw_title, dict):
         title_text = raw_title.get("text")
         if not isinstance(title_text, str) or not title_text.strip():
             raise MovieSpecError(
-                "movie.json: 'title.text' is required and must be a non-empty string")
+                "spec: 'title.text' is required and must be a non-empty string")
         ta = raw_title.get("audio", "")
         if ta is None:
             ta = ""
         if not isinstance(ta, str):
-            raise MovieSpecError("movie.json: 'title.audio' must be a string if present")
+            raise MovieSpecError("spec: 'title.audio' must be a string if present")
         title_audio_name = ta
     else:
         raise MovieSpecError(
-            "movie.json: 'title' must be a string or an object {text, audio}")
+            "spec: 'title' must be a string or an object {text, audio}")
 
     title_audio_path: Path | None = None
     if title_audio_name:
         title_audio_path = input_folder / title_audio_name
         if not title_audio_path.is_file():
             raise MovieSpecError(
-                f"movie.json: title.audio '{title_audio_name}' not found in folder")
+                f"spec: title.audio '{title_audio_name}' not found in input folder")
 
     title_spec = {"text": title_text, "audio": title_audio_path}
 
     entries = data.get("images")
     if not isinstance(entries, list) or len(entries) < 2:
-        raise MovieSpecError("movie.json: 'images' must be a list with at least 2 entries")
+        raise MovieSpecError("spec: 'images' must be a list with at least 2 entries")
 
     image_files = list_images(input_folder)
     image_names = {p.name: p for p in image_files}
@@ -137,27 +136,27 @@ def load_movie(input_folder: Path) -> tuple[dict, list[dict]]:
     norm_entries: list[dict] = []
     for i, e in enumerate(entries):
         if not isinstance(e, dict):
-            raise MovieSpecError(f"movie.json: images[{i}] must be an object")
+            raise MovieSpecError(f"spec: images[{i}] must be an object")
         fname = e.get("image")
         if not isinstance(fname, str) or not fname:
-            raise MovieSpecError(f"movie.json: images[{i}].image is required")
+            raise MovieSpecError(f"spec: images[{i}].image is required")
         if fname not in image_names:
             raise MovieSpecError(
-                f"movie.json: images[{i}].image '{fname}' not found in folder")
+                f"spec: images[{i}].image '{fname}' not found in input folder")
         text = e.get("text")
         if text is not None and not isinstance(text, str):
-            raise MovieSpecError(f"movie.json: images[{i}].text must be a string if present")
+            raise MovieSpecError(f"spec: images[{i}].text must be a string if present")
         audio_name = e.get("audio", "")
         if audio_name is None:
             audio_name = ""
         if not isinstance(audio_name, str):
-            raise MovieSpecError(f"movie.json: images[{i}].audio must be a string if present")
+            raise MovieSpecError(f"spec: images[{i}].audio must be a string if present")
         audio_path: Path | None = None
         if audio_name:
             audio_path = (input_folder / audio_name)
             if not audio_path.is_file():
                 raise MovieSpecError(
-                    f"movie.json: images[{i}].audio '{audio_name}' not found in folder")
+                    f"spec: images[{i}].audio '{audio_name}' not found in input folder")
         norm_entries.append({
             "image": fname,
             "text": text,
@@ -167,7 +166,7 @@ def load_movie(input_folder: Path) -> tuple[dict, list[dict]]:
 
     if len(norm_entries) != len(image_files):
         raise MovieSpecError(
-            f"movie.json lists {len(norm_entries)} images but folder has "
+            f"spec lists {len(norm_entries)} images but input folder has "
             f"{len(image_files)} supported image files")
 
     return title_spec, norm_entries
@@ -518,122 +517,60 @@ def overlay_caption_on_array(frame_arr: np.ndarray, text: str) -> np.ndarray:
     return np.array(out.convert("RGB"))
 
 
-def build_video(
-    input_folder: str | os.PathLike,
-    display_seconds: float = DEFAULT_DISPLAY,
-    transition_seconds: float = DEFAULT_TRANSITION,
+def assemble(
+    *,
+    composite_clips: list,
+    sections: list[dict],
+    output_folder: str | os.PathLike,
+    target_size: tuple[int, int],
+    total_duration: float,
+    clips_to_close: list | None = None,
+    extra_metadata: dict | None = None,
+    script_id: str = "",
+    spec_path: str | os.PathLike | None = None,
+    started_at: str | None = None,
 ) -> dict:
-    """Build a slideshow video with an opening composition + captioned images.
+    """Write the final composite video and return a section-aware result dict.
 
-    The intro clip's duration is the title audio's duration (if present) plus
-    `transition_seconds` of silent padding on each side; otherwise it falls
-    back to INTRO_SECONDS. Each slide's clip duration is its audio duration
-    (or --display when no audio) plus `transition_seconds` of silence on each
-    side, so consecutive audios are separated by `transition_seconds` of clean
-    silence and never overlap (the visual crossfade happens during the silent
-    tails).
+    This is the shared finalizer used by every script. Scripts build their own
+    clips, measure per-section wall-clock times, compute timeline positions,
+    then hand everything to `assemble` which:
 
-    Returns a dict with:
-      video_path:  relative path "output/<timestamp>.mp4"
-      metadata:    {...}
+      1. composites the positioned clips into one video of `total_duration`,
+      2. writes it to `<output_folder>/<timestamp>.mp4`,
+      3. closes all clips + the composite,
+      4. returns a dict with per-section time marks and summary metadata.
+
+    `sections` is a list of dicts (in timeline order) each containing at least:
+        name, start_seconds, end_seconds, duration_seconds,
+        started_at (wall-clock ISO8601 when this section began building),
+        finished_at (wall-clock ISO8601 when this section finished building)
+
+    `composite_clips` are the already-positioned clips (with_start/with_effects
+    applied by the script) to be composited.
+
+    `clips_to_close` lists any clips (audio, intro, image, ...) that should be
+    closed after writing; the composite itself is always closed.
+
+    `extra_metadata` is merged into the `metadata` block of the result (use this
+    for script-specific fields like image_count, title, transition_seconds...).
+
+    `script_id`, `spec_path`, `started_at` are echoed in the result for the
+    caller. `started_at` should be the ISO8601 timestamp captured when the
+    script began; if omitted, the current time is used.
     """
-    input_folder = Path(input_folder).resolve()
-    if not input_folder.is_dir():
-        raise FileNotFoundError(f"input_folder does not exist: {input_folder}")
+    from moviepy import CompositeVideoClip
 
-    title, entries = load_movie(input_folder)
-    image_paths = [e["path"] for e in entries]
+    target_w, target_h = target_size
+    output_folder = Path(output_folder).resolve()
+    output_folder.mkdir(parents=True, exist_ok=True)
 
-    from moviepy import ImageClip, CompositeVideoClip, AudioFileClip
-    try:
-        from moviepy.video.fx import CrossFadeIn
-    except Exception:
-        from moviepy.video.fx.all import CrossFadeIn  # type: ignore
-
-    # Target size from the first image.
-    with Image.open(image_paths[0]) as im:
-        target_w, target_h = im.size
-
-    rng = np.random.default_rng(1234)
-
-    # 1. Intro composition clip.
-    #    Duration = title_audio.duration + 2*transition (silence-padded) when
-    #    title audio is present; otherwise the silent INTRO_SECONDS default.
-    intro_audio_clips: list = []
-    if title.get("audio") is not None:
-        title_audio = AudioFileClip(str(title["audio"]))
-        intro_audio_clips.append(title_audio)
-        intro_padded_audio = padded_audio(title_audio, transition_seconds)
-        intro_duration = float(intro_padded_audio.duration)
-        print(f"[movie-py] Building intro composition ({intro_duration:.1f}s, "
-              f"title audio {title_audio.duration:.1f}s) ...", flush=True)
-    else:
-        intro_padded_audio = None
-        intro_duration = float(INTRO_SECONDS)
-        print(f"[movie-py] Building intro composition ({intro_duration:.1f}s, "
-              f"silent) ...", flush=True)
-
-    intro_clip = build_composition_clip(
-        image_paths, title, target_w, target_h, intro_duration, rng)
-    if intro_padded_audio is not None:
-        intro_clip = intro_clip.with_audio(intro_padded_audio)
-
-    # 2. Per-image clips with captions and silence-padded audio.
-    #    Clip duration = audio duration (or --display) + 2*transition_seconds.
-    from tqdm import tqdm
-
-    image_clips: list = []
-    durations: list[float] = []
-    audio_clips: list = []
-    pad = float(transition_seconds)
-    for e in tqdm(entries, desc="Preparing slides", unit="slide"):
-        arr = load_normalized(e["path"], target_w, target_h)
-        text = e.get("text")
-        if text:
-            arr = overlay_caption_on_array(arr, text)
-        if e.get("audio") is not None:
-            a = AudioFileClip(str(e["audio"]))
-            audio_clips.append(a)
-            padded = padded_audio(a, pad)
-            dur = float(padded.duration)
-            clip = ImageClip(arr).with_duration(dur).with_audio(padded)
-        else:
-            dur = float(display_seconds) + 2 * pad
-            clip = ImageClip(arr).with_duration(dur)
-        image_clips.append(clip)
-        durations.append(dur)
-
-    # Assemble timeline: intro + image_clips with crossfades.
-    # intro starts at 0; first image starts at (intro_duration - transition) so
-    # it crossfades over the tail of the intro; subsequent images step by
-    # (prev_duration - transition_seconds).
-    #
-    # Because each clip's duration includes 2*transition of silent padding
-    # around its audio, the next clip's audio starts exactly transition_seconds
-    # after the previous clip's audio ends -- no audio overlap, and the visual
-    # crossfade happens entirely within the silent tails.
-    intro_clip = intro_clip.with_start(0)
-    start = intro_duration - transition_seconds
-    for i, clip in enumerate(image_clips):
-        clip = clip.with_start(start)
-        clip = clip.with_effects([CrossFadeIn(transition_seconds)])
-        image_clips[i] = clip
-        start += durations[i] - transition_seconds
-
-    # After the loop, `start` is one transition past the last clip's end
-    # (it was incremented after the last clip was placed). Add it back.
-    total_duration = start + transition_seconds
-
-    composite = CompositeVideoClip(
-        [intro_clip] + image_clips, size=(target_w, target_h))
-    composite = composite.with_duration(total_duration)
-
-    # Output: <input>/output/<timestamp>.mp4
-    output_dir = input_folder / "output"
-    output_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     video_filename = f"{timestamp}.mp4"
-    output_path = output_dir / video_filename
+    output_path = output_folder / video_filename
+
+    composite = CompositeVideoClip(composite_clips, size=(target_w, target_h))
+    composite = composite.with_duration(total_duration)
 
     composite.write_videofile(
         str(output_path),
@@ -644,7 +581,7 @@ def build_video(
         logger="bar",
     )
 
-    for c in [intro_clip] + image_clips + audio_clips + intro_audio_clips:
+    for c in (clips_to_close or []):
         try:
             c.close()
         except Exception:
@@ -653,51 +590,31 @@ def build_video(
 
     file_size = output_path.stat().st_size
     frame_count = round(total_duration * FPS)
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     print(
-        f"[movie-py] Video: {total_duration:.1f}s, {len(image_clips)} slides, "
-        f"{target_w}x{target_h}, {file_size/1e6:.1f}MB -> {video_filename}",
+        f"[movie-py] Video: {total_duration:.1f}s, {target_w}x{target_h}, "
+        f"{file_size/1e6:.1f}MB -> {video_filename}",
         flush=True,
     )
 
-    return {
-        "video_path": f"output/{video_filename}",
-        "metadata": {
-            "duration_seconds": round(total_duration, 3),
-            "frame_count": frame_count,
-            "fps": FPS,
-            "resolution": f"{target_w}x{target_h}",
-            "image_count": len(image_clips),
-            "intro_seconds": round(intro_duration, 3),
-            "title": title["text"],
-            "title_audio": title["audio"].name if title.get("audio") else None,
-            "transition_seconds": transition_seconds,
-            "display_seconds": display_seconds,
-            "codec": "h264",
-            "file_size_bytes": file_size,
-            "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        },
+    metadata = {
+        "frame_count": frame_count,
+        "fps": FPS,
+        "resolution": f"{target_w}x{target_h}",
+        "codec": "h264",
+        "file_size_bytes": file_size,
     }
+    if extra_metadata:
+        metadata.update(extra_metadata)
 
-
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Build a slideshow video from images.")
-    parser.add_argument("input_folder", help="Folder containing input images + movie.json")
-    parser.add_argument("--display", type=float, default=DEFAULT_DISPLAY,
-                        help="Seconds each slide displays when it has no audio (default 5)")
-    parser.add_argument("--transition", type=float, default=DEFAULT_TRANSITION,
-                        help="Crossfade duration in seconds (default 1)")
-    args = parser.parse_args(argv)
-
-    try:
-        result = build_video(args.input_folder, args.display, args.transition)
-    except Exception as e:
-        print(json.dumps({"error": str(e)}), file=sys.stderr)
-        return 1
-
-    print(json.dumps(result, indent=2))
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())
+    return {
+        "video_path": str(output_path),
+        "script_id": script_id,
+        "spec_path": str(spec_path) if spec_path else None,
+        "started_at": started_at or now_iso,
+        "finished_at": now_iso,
+        "total_duration_seconds": round(total_duration, 3),
+        "sections": sections,
+        "metadata": metadata,
+    }
