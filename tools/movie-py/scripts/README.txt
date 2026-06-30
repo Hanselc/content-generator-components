@@ -75,7 +75,6 @@ Result shape
 build() must return a dict shaped like:
 
   {
-    "video_path":             "/abs/path/to/<timestamp>.mp4",
     "script_id":              "<scriptId>",
     "spec_path":              "/abs/path/to/spec.json" | null,
     "started_at":             "2026-06-30T11:30:00Z",
@@ -86,12 +85,34 @@ build() must return a dict shaped like:
        "duration_seconds": 11.0, "started_at": "...", "finished_at": "..."},
       ...
     ],
+    "outputs": [
+      {"index": 0, "path": "/abs/path/to/<file>.<ext>", "kind": "video",
+       "label": "main", "section": "intro"},
+      ...
+    ],
     "metadata": { ... script-specific + common fields ... }
   }
 
+`outputs` is REQUIRED and is a non-empty list of output-file descriptors, one
+per file produced. The server validates it after build() runs. Each entry:
+  - index:   int, required, unique, 0-based within the list.
+  - path:    str, required, absolute; must exist on disk and resolve inside
+             ctx.output_folder.
+  - kind:    str, required, one of: "audio", "video", "metadata", "image",
+             "other".
+  - label:   str, optional, a script-defined stable identifier
+             (e.g. "episode_1_video").
+  - section: str, optional, the name of a section in `sections` this output
+             belongs to.
+
+There is no top-level `video_path` field (removed from the contract). A
+script producing a single video simply returns `outputs` with one entry of
+kind "video".
+
 The simplest path is to call ctx.primitives.assemble(...), which writes the
 composite to <output_folder>/<timestamp>.mp4 and constructs this dict for you
-from the sections list and clips you hand it.
+from the sections list and clips you hand it; it returns a single
+`outputs` entry (index 0, kind "video", label "main").
 
 Request shape (POST /generate)
 ------------------------------

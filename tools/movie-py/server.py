@@ -316,7 +316,99 @@ def generate():
     except Exception as e:
         return jsonify({"error": f"video build failed: {e}"}), 500
 
+    # --- Validate the result contract (required `outputs` list) ----------
+    outputs_errors = _validate_outputs(result, output_folder_p)
+    if outputs_errors:
+        return jsonify({
+            "error": "script returned an invalid result contract",
+            "details": outputs_errors,
+        }), 500
+
     return jsonify(result), 200
+
+
+# Valid kinds for outputs entries.
+_OUTPUT_KINDS = {"audio", "video", "metadata", "image", "other"}
+
+
+def _validate_outputs(result, output_folder: Path) -> list[str]:
+    """Validate the `outputs` field of a build() result dict.
+
+    Contract:
+      - result must be a dict.
+      - `outputs` must be a non-empty list.
+      - Each entry must be a dict with:
+          index:  int, unique, 0-based within the list.
+          path:   str, absolute, must exist and resolve inside output_folder.
+          kind:   one of _OUTPUT_KINDS.
+          label:  optional str.
+          section: optional str.
+      - No top-level `video_path` (removed from the contract).
+    Returns a list of human-readable error messages (empty if valid).
+    """
+    errors: list[str] = []
+    if not isinstance(result, dict):
+        return ["result must be a dict"]
+
+    if "video_path" in result:
+        errors.append(
+            "result.video_path is no longer part of the contract; use "
+            "`outputs` instead")
+
+    outputs = result.get("outputs")
+    if outputs is None:
+        errors.append("result.outputs is required (a non-empty list)")
+        return errors
+    if not isinstance(outputs, list) or not outputs:
+        errors.append("result.outputs must be a non-empty list")
+        return errors
+
+    seen_indices: set[int] = set()
+    output_folder_resolved = output_folder.resolve()
+    for i, entry in enumerate(outputs):
+        prefix = f"result.outputs[{i}]"
+        if not isinstance(entry, dict):
+            errors.append(f"{prefix}: must be an object")
+            continue
+
+        idx = entry.get("index")
+        if not isinstance(idx, int) or isinstance(idx, bool):
+            errors.append(f"{prefix}.index: must be an integer")
+        elif idx in seen_indices:
+            errors.append(f"{prefix}.index: duplicate index {idx}")
+        else:
+            seen_indices.add(idx)
+
+        kind = entry.get("kind")
+        if kind not in _OUTPUT_KINDS:
+            errors.append(
+                f"{prefix}.kind: must be one of {sorted(_OUTPUT_KINDS)}, "
+                f"got {kind!r}")
+
+        path = entry.get("path")
+        if not isinstance(path, str) or not path:
+            errors.append(f"{prefix}.path: must be a non-empty string")
+        else:
+            try:
+                p = Path(path).resolve()
+                p.relative_to(output_folder_resolved)
+            except ValueError:
+                errors.append(
+                    f"{prefix}.path: must resolve inside output_folder "
+                    f"({output_folder_resolved}); got {path!r}")
+            else:
+                if not p.is_file():
+                    errors.append(f"{prefix}.path: does not exist: {path!r}")
+
+        label = entry.get("label")
+        if label is not None and not isinstance(label, str):
+            errors.append(f"{prefix}.label: must be a string if present")
+
+        section = entry.get("section")
+        if section is not None and not isinstance(section, str):
+            errors.append(f"{prefix}.section: must be a string if present")
+
+    return errors
 
 
 if __name__ == "__main__":

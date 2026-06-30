@@ -15,10 +15,11 @@ load_movie(spec_path, input_folder)
 
 assemble(composite_clips, sections_meta, output_folder, target_size, ...)
     Write the final composite video to `output_folder/<timestamp>.mp4` and
-    return a dict containing `video_path`, `sections` (with per-section time
-    marks: start_seconds/end_seconds/duration_seconds + wall-clock
-    started_at/finished_at), `total_duration_seconds`, `started_at`,
-    `finished_at`, and `metadata`.
+    return a dict containing `outputs` (a list of output-file descriptors; here
+    a single `{index:0, path, kind:"video", label:"main"}` entry), `sections`
+    (with per-section time marks: start_seconds/end_seconds/duration_seconds +
+    wall-clock started_at/finished_at), `total_duration_seconds`,
+    `started_at`, `finished_at`, and `metadata`.
 """
 from __future__ import annotations
 
@@ -609,12 +610,19 @@ def assemble(
         metadata.update(extra_metadata)
 
     return {
-        "video_path": str(output_path),
         "script_id": script_id,
         "spec_path": str(spec_path) if spec_path else None,
         "started_at": started_at or now_iso,
         "finished_at": now_iso,
         "total_duration_seconds": round(total_duration, 3),
         "sections": sections,
+        "outputs": [
+            {
+                "index": 0,
+                "path": str(output_path),
+                "kind": "video",
+                "label": "main",
+            }
+        ],
         "metadata": metadata,
     }
