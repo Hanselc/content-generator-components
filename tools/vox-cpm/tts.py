@@ -104,6 +104,17 @@ def _read_wav_bytes(wav_path: str) -> bytes:
         return f.read()
 
 
+def _wav_duration_seconds(wav_path: str) -> float:
+    """Return the duration of a wav file in seconds (0.0 on error)."""
+    try:
+        import soundfile as sf
+
+        info = sf.info(wav_path)
+        return float(info.duration)
+    except Exception:
+        return 0.0
+
+
 def _get_model(
     model_name: str,
     prompt_wav_path: str,
@@ -136,6 +147,7 @@ def _get_model(
 
     local_model_path = _resolve_local_model(model_name)
 
+    print(f"[voxcpm] Loading model: {model_name} (device={device}) ...", flush=True)
     _model = NanoVoxCPM.from_pretrained(
         model=local_model_path,
         devices=[gpu_index],
@@ -147,6 +159,8 @@ def _get_model(
 
     # Pre-encode the prompt pair once (add_prompt first, encode_latents fallback).
     prompt_bytes = _read_wav_bytes(prompt_wav_path)
+    prompt_dur = _wav_duration_seconds(prompt_wav_path)
+    print(f"[voxcpm] Encoding prompt ({prompt_dur:.1f}s) ...", flush=True)
     try:
         _prompt_id = _model.add_prompt(prompt_bytes, "wav", prompt_text)
         _prompt_latents_fallback = None
@@ -156,6 +170,8 @@ def _get_model(
 
     # Optional reinforce/reference clip -> ref_audio_latents.
     if reference_wav_path:
+        ref_dur = _wav_duration_seconds(reference_wav_path)
+        print(f"[voxcpm] Encoding reference ({ref_dur:.1f}s) ...", flush=True)
         try:
             ref_bytes = _read_wav_bytes(reference_wav_path)
             _ref_audio_latents = _model.encode_latents(ref_bytes, "wav")
@@ -164,6 +180,7 @@ def _get_model(
     else:
         _ref_audio_latents = None
 
+    print("[voxcpm] Model ready.", flush=True)
     atexit.register(teardown)
     return _model
 
@@ -362,7 +379,9 @@ def generate_audio(
         raise ValueError("text is empty or contains no speakable content")
 
     all_wavs: list[np.ndarray] = []
-    for seg in segments:
+    from tqdm import tqdm
+
+    for seg in tqdm(segments, desc="Generating", unit="seg"):
         kwargs: dict = dict(
             target_text=seg,
             cfg_value=cfg_value,
@@ -393,6 +412,12 @@ def generate_audio(
 
     file_size = output_path.stat().st_size
     duration = len(full_wav) / float(SAMPLE_RATE)
+
+    print(
+        f"[voxcpm] Audio: {len(segments)} segment(s), {duration:.1f}s, "
+        f"{SAMPLE_RATE}Hz, {file_size/1024:.0f}KB -> {output_path.name}",
+        flush=True,
+    )
 
     return {
         "sample_rate": SAMPLE_RATE,

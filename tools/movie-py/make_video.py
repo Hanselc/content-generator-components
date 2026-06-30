@@ -462,15 +462,18 @@ def build_video(
     rng = np.random.default_rng(1234)
 
     # 1. Intro composition clip (INTRO_SECONDS).
+    print(f"[movie-py] Building intro composition ({INTRO_SECONDS}s) ...", flush=True)
     intro_clip = build_composition_clip(
         image_paths, title, target_w, target_h, INTRO_SECONDS, rng)
 
     # 2. Per-image clips with captions, crossfades between consecutive clips.
     #    Slide duration = audio duration if present, else display_seconds.
+    from tqdm import tqdm
+
     image_clips: list = []
     durations: list[float] = []
     audio_clips: list = []
-    for e in entries:
+    for e in tqdm(entries, desc="Preparing slides", unit="slide"):
         arr = load_normalized(e["path"], target_w, target_h)
         text = e.get("text")
         if text:
@@ -519,7 +522,7 @@ def build_video(
         codec=CODEC,
         audio_codec="aac",
         ffmpeg_params=["-pix_fmt", "yuv420p"],
-        logger=None,
+        logger="bar",
     )
 
     for c in [intro_clip] + image_clips + audio_clips:
@@ -531,6 +534,12 @@ def build_video(
 
     file_size = output_path.stat().st_size
     frame_count = round(total_duration * FPS)
+
+    print(
+        f"[movie-py] Video: {total_duration:.1f}s, {len(image_clips)} slides, "
+        f"{target_w}x{target_h}, {file_size/1e6:.1f}MB -> {video_filename}",
+        flush=True,
+    )
 
     return {
         "video_path": f"output/{video_filename}",
