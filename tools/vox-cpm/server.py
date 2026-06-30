@@ -8,11 +8,17 @@ Run (prod):
 The only job of this service is: read input text, write an audio file.
 Voices are selected by referenceId; each referenceId maps to a subfolder under
 references/ containing its own reference.json + audio clips.
+
+`output_path` in /generate is workspace-relative (resolved against
+WORKSPACE_BASE_PATH from .env). Absolute paths and paths that escape the
+workspace are rejected with 400. The response echoes `audio_path` as the
+relative path the caller sent.
 """
 from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -30,6 +36,21 @@ from tts import (
 # Load .env from this script's directory.
 SCRIPT_DIR = Path(__file__).resolve().parent
 load_dotenv(SCRIPT_DIR / ".env")
+
+# Workspace base path. Request path fields (output_path) are workspace-relative
+# and resolved against this. Fail fast at startup if unset or not a directory.
+WORKSPACE_BASE_PATH = os.environ.get("WORKSPACE_BASE_PATH", "")
+if not WORKSPACE_BASE_PATH:
+    sys.stderr.write(
+        "FATAL: WORKSPACE_BASE_PATH is not set. Configure it in "
+        f"{SCRIPT_DIR / '.env'} (e.g. /home/hansel/documents/dev/projects/n8n).\n")
+    sys.exit(1)
+WORKSPACE_BASE_PATH = Path(os.path.expanduser(WORKSPACE_BASE_PATH)).resolve()
+if not WORKSPACE_BASE_PATH.is_dir():
+    sys.stderr.write(
+        f"FATAL: WORKSPACE_BASE_PATH does not exist or is not a directory: "
+        f"{WORKSPACE_BASE_PATH}\n")
+    sys.exit(1)
 
 # Directory holding per-voice subfolders (references/<referenceId>/).
 REFERENCES_DIR = Path(os.environ.get("REFERENCES_DIR", "")).expanduser() if os.environ.get("REFERENCES_DIR") else SCRIPT_DIR / "references"
@@ -93,6 +114,32 @@ def _load_reference(reference_id: str) -> dict:
     return result
 
 
+def resolve_workspace_path(rel: str, field_name: str) -> Path:
+    """Resolve a workspace-relative path against WORKSPACE_BASE_PATH.
+
+    `rel` must be a non-empty relative path. Absolute paths are rejected
+    (callers must send workspace-relative paths). After joining onto
+    WORKSPACE_BASE_PATH, the resolved path must stay inside the workspace
+    (path traversal via .. is rejected).
+
+    Returns the resolved absolute Path. Raises ValueError with a
+    user-facing message on any rejection.
+    """
+    if not rel or not isinstance(rel, str) or not rel.strip():
+        raise ValueError(f"{field_name} is required")
+    if os.path.isabs(rel):
+        raise ValueError(
+            f"{field_name} must be a workspace-relative path (relative to "
+            f"WORKSPACE_BASE_PATH={WORKSPACE_BASE_PATH}), not an absolute path")
+    resolved = (WORKSPACE_BASE_PATH / rel).resolve()
+    try:
+        resolved.relative_to(WORKSPACE_BASE_PATH)
+    except ValueError:
+        raise ValueError(
+            f"{field_name} escapes WORKSPACE_BASE_PATH (resolved to {resolved})")
+    return resolved
+
+
 app = Flask(__name__)
 
 
@@ -132,10 +179,12 @@ def generate():
 
     if not text or not str(text).strip():
         return jsonify({"error": "text is required and must be non-empty"}), 400
-    if not output_path or not isinstance(output_path, str):
-        return jsonify({"error": "output_path is required"}), 400
-    if not os.path.isabs(output_path):
-        return jsonify({"error": "output_path must be an absolute path"}), 400
+
+    # output_path is workspace-relative and resolved against WORKSPACE_BASE_PATH.
+    try:
+        output_path_resolved = resolve_workspace_path(output_path, "output_path")
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
 
     try:
         ref = _load_reference(reference_id)
@@ -151,7 +200,7 @@ def generate():
             text=text,
             prompt_wav_path=ref["prompt_wav_path"],
             prompt_text=ref["prompt_text"],
-            output_path=output_path,
+            output_path=str(output_path_resolved),
             reference_wav_path=ref.get("reference_wav_path"),
             model_name=MODEL_NAME,
             cfg_value=cfg_value,
@@ -164,6 +213,7 @@ def generate():
     except Exception as e:
         return jsonify({"error": f"audio generation failed: {e}"}), 500
 
+    # Echo the relative path as sent by the caller (not the resolved absolute).
     response = {"audio_path": output_path, "reference_id": reference_id, "metadata": result}
     return jsonify(response), 200
 

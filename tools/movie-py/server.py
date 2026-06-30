@@ -20,14 +20,16 @@ Endpoints:
 POST /generate request:
     {
       "scriptId":        "SocialMediaGenerator",  # required, must preexist
-      "input_folder":    "/abs/path/to/images",   # required, absolute
-      "output_folder":   "/abs/path/for/output",  # required, absolute
-      "spec_path":       "/abs/path/to/spec.json",# required, absolute
+      "input_folder":    "relative/to/workspace", # required, workspace-relative
+      "output_folder":   "relative/to/workspace", # required, workspace-relative
+      "spec_path":       "relative/to/workspace", # required, workspace-relative
       "params": { ... }                           # dynamic, per-script
     }
 
-All path fields must be absolute. `params` is validated against the script's
-PARAM_SCHEMA (when declared) before build() is invoked.
+All path fields must be workspace-relative (resolved against WORKSPACE_BASE_PATH
+from .env). Absolute paths and paths that escape the workspace are rejected
+with 400. `params` is validated against the script's PARAM_SCHEMA (when
+declared) before build() is invoked.
 """
 from __future__ import annotations
 
@@ -53,7 +55,49 @@ SCRIPTS_DIR = SCRIPT_DIR / "scripts"
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
+# Workspace base path. Request path fields (input_folder, output_folder,
+# spec_path) are workspace-relative and resolved against this. Fail fast at
+# startup if it is unset or not a directory.
+WORKSPACE_BASE_PATH = os.environ.get("WORKSPACE_BASE_PATH", "")
+if not WORKSPACE_BASE_PATH:
+    sys.stderr.write(
+        "FATAL: WORKSPACE_BASE_PATH is not set. Configure it in "
+        f"{SCRIPT_DIR / '.env'} (e.g. /home/hansel/documents/dev/projects/n8n).\n")
+    sys.exit(1)
+WORKSPACE_BASE_PATH = Path(os.path.expanduser(WORKSPACE_BASE_PATH)).resolve()
+if not WORKSPACE_BASE_PATH.is_dir():
+    sys.stderr.write(
+        f"FATAL: WORKSPACE_BASE_PATH does not exist or is not a directory: "
+        f"{WORKSPACE_BASE_PATH}\n")
+    sys.exit(1)
+
 app = Flask(__name__)
+
+
+def resolve_workspace_path(rel: str, field_name: str) -> Path:
+    """Resolve a workspace-relative path against WORKSPACE_BASE_PATH.
+
+    `rel` must be a non-empty relative path. Absolute paths are rejected
+    (callers must send workspace-relative paths). After joining onto
+    WORKSPACE_BASE_PATH, the resolved path must stay inside the workspace
+    (path traversal via .. is rejected).
+
+    Returns the resolved absolute Path. Raises ValueError with a
+    user-facing message on any rejection.
+    """
+    if not rel or not isinstance(rel, str) or not rel.strip():
+        raise ValueError(f"{field_name} is required")
+    if os.path.isabs(rel):
+        raise ValueError(
+            f"{field_name} must be a workspace-relative path (relative to "
+            f"WORKSPACE_BASE_PATH={WORKSPACE_BASE_PATH}), not an absolute path")
+    resolved = (WORKSPACE_BASE_PATH / rel).resolve()
+    try:
+        resolved.relative_to(WORKSPACE_BASE_PATH)
+    except ValueError:
+        raise ValueError(
+            f"{field_name} escapes WORKSPACE_BASE_PATH (resolved to {resolved})")
+    return resolved
 
 
 def _now_iso() -> str:
@@ -209,21 +253,14 @@ def generate():
     spec_path = data.get("spec_path")
     params = data.get("params", {})
 
-    if not input_folder or not isinstance(input_folder, str):
-        return jsonify({"error": "input_folder is required"}), 400
-    if not output_folder or not isinstance(output_folder, str):
-        return jsonify({"error": "output_folder is required"}), 400
-    if not spec_path or not isinstance(spec_path, str):
-        return jsonify({"error": "spec_path is required"}), 400
-    if not os.path.isabs(input_folder):
-        return jsonify({"error": "input_folder must be an absolute path"}), 400
-    if not os.path.isabs(output_folder):
-        return jsonify({"error": "output_folder must be an absolute path"}), 400
-    if not os.path.isabs(spec_path):
-        return jsonify({"error": "spec_path must be an absolute path"}), 400
+    # Path fields are workspace-relative and resolved against WORKSPACE_BASE_PATH.
+    try:
+        input_folder_p = resolve_workspace_path(input_folder, "input_folder")
+        output_folder_p = resolve_workspace_path(output_folder, "output_folder")
+        spec_path_p = resolve_workspace_path(spec_path, "spec_path")
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
 
-    input_folder_p = Path(input_folder)
-    spec_path_p = Path(spec_path)
     if not input_folder_p.is_dir():
         return jsonify({"error": f"input_folder does not exist or is not a directory: {input_folder}"}), 400
     if not spec_path_p.is_file():
@@ -258,9 +295,9 @@ def generate():
     started_at = _now_iso()
     ctx = SimpleNamespace(
         params=params,
-        input_folder=input_folder_p.resolve(),
-        output_folder=Path(output_folder).resolve(),
-        spec_path=spec_path_p.resolve(),
+        input_folder=input_folder_p,
+        output_folder=output_folder_p,
+        spec_path=spec_path_p,
         common={
             "script_id": script_id,
             "started_at": started_at,
