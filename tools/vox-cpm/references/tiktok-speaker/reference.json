@@ -1,0 +1,6 @@
+{
+  "prompt_audio": "reference.wav",
+  "prompt_text": "¿Sabías que los pulpos tienen tres corazones y sangre azul? Uno de ellos se detiene cuando nadan, por eso prefieren caminar por el fondo del mar. ¡Y eso no es todo: pueden cambiar de color en un parpadeo para camuflarse con cualquier superficie!",
+  "reinforce_audio": "reference_reinforce.wav",
+  "reinforce_enabled": true
+}
