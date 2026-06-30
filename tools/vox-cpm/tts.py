@@ -319,14 +319,62 @@ def _split_long_segment(segment: str, max_chars: int) -> list[str]:
     return result
 
 
+def _is_speakable(segment: str) -> bool:
+    """Whether a segment has content worth synthesizing (not just punctuation)."""
+    return bool(re.search(r"[\w]", segment, flags=re.UNICODE))
+
+
+def _split_paragraphs(text: str) -> list[str]:
+    """Split text into paragraphs on blank lines.
+
+    A paragraph break is one or more blank lines (a line that is empty or
+    whitespace-only). Single newlines within a paragraph are joined with a
+    single space so hard-wrapped text is treated as one flowing paragraph.
+    """
+    # Normalize CRLF -> LF, then split on runs of blank lines.
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    raw_paragraphs = re.split(r"\n[ \t]*\n", normalized)
+    paragraphs: list[str] = []
+    for raw in raw_paragraphs:
+        # Join single newlines within a paragraph into a single space.
+        joined = re.sub(r"\s*\n\s*", " ", raw).strip()
+        if joined:
+            paragraphs.append(joined)
+    return paragraphs
+
+
+def _append_pause_marker(segment: str) -> str:
+    """Append a pause marker ('..') to mark the end of a paragraph.
+
+    The doubled period lengthens the inter-paragraph pause in VoxCPM output.
+      - If the segment already ends with '..' (or a longer run of dots),
+        leave it as-is to avoid stacking.
+      - If it ends with sentence-ending punctuation (. ! ? 。 ！ ？), append a
+        single '.' so e.g. '.' -> '..'.
+      - Otherwise append '..'.
+    """
+    seg = segment.rstrip()
+    if not seg:
+        return seg
+    # Already ends with two-or-more dots -> don't stack.
+    if re.search(r"\.{2,}$", seg):
+        return seg
+    last = seg[-1]
+    if last in _SENTENCE_ENDS:
+        return seg + "."
+    return seg + ".."
+
+
 def _split_text(text: str, max_chars: int = MAX_SEGMENT_CHARS) -> list[str]:
     """Split text into segments suitable for stable VoxCPM generation.
 
     Splitting priority (each keeps the delimiter attached):
-      1. Sentence-ending punctuation (. ! ? 。 ！ ？)
-      2. If a sentence exceeds max_chars: clause boundaries (, ; : 、 ， ；)
-      3. If still too long: conjunctions (y, o, pero, and, but, ...)
-      4. Last resort: word boundaries near max_chars
+      1. Paragraphs (blank lines); each paragraph's final segment gets a '..'
+         pause marker appended to lengthen the inter-paragraph pause.
+      2. Sentence-ending punctuation (. ! ? 。 ！ ？)
+      3. If a sentence exceeds max_chars: clause boundaries (, ; : 、 ， ；)
+      4. If still too long: conjunctions (y, o, pero, and, but, ...)
+      5. Last resort: word boundaries near max_chars
 
     VoxCPM can drift on long inputs, so we segment and generate each piece
     independently, then concatenate the waveforms into a single output.
@@ -335,18 +383,31 @@ def _split_text(text: str, max_chars: int = MAX_SEGMENT_CHARS) -> list[str]:
     if not text:
         return []
 
-    # 1. Split on sentence-ending punctuation.
-    sentences = _split_at_punctuation(text, _SENTENCE_ENDS)
-    if not sentences:
-        sentences = [text]
-
-    # 2. Split any sentence that exceeds max_chars.
     segments: list[str] = []
-    for sentence in sentences:
-        if len(sentence) <= max_chars:
-            segments.append(sentence)
-        else:
-            segments.extend(_split_long_segment(sentence, max_chars))
+    for paragraph in _split_paragraphs(text):
+        # Split the paragraph on sentence-ending punctuation, then run the
+        # over-length cascade on any sentence that exceeds max_chars.
+        sentences = _split_at_punctuation(paragraph, _SENTENCE_ENDS)
+        if not sentences:
+            sentences = [paragraph]
+
+        para_segs: list[str] = []
+        for sentence in sentences:
+            if len(sentence) <= max_chars:
+                para_segs.append(sentence)
+            else:
+                para_segs.extend(_split_long_segment(sentence, max_chars))
+
+        # Drop non-speakable fragments (e.g. stray dots from "Hello... World"
+        # would otherwise become pointless TTS segments).
+        para_segs = [s for s in para_segs if _is_speakable(s)]
+
+        if not para_segs:
+            continue
+
+        # Mark the end of the paragraph on its final segment.
+        para_segs[-1] = _append_pause_marker(para_segs[-1])
+        segments.extend(para_segs)
 
     return segments
 
