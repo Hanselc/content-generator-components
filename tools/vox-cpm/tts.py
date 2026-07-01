@@ -459,9 +459,12 @@ def generate_audio(
         raise ValueError("text is empty or contains no speakable content")
 
     all_wavs: list[np.ndarray] = []
-    from tqdm import tqdm
+    import time
 
-    for seg in tqdm(segments, desc="Generating", unit="seg"):
+    total = len(segments)
+    gen_t0 = time.monotonic()
+    for idx, seg in enumerate(segments, start=1):
+        print(f"[voxcpm] Generating segment {idx}/{total} ...", flush=True)
         kwargs: dict = dict(
             target_text=seg,
             cfg_value=cfg_value,
@@ -476,6 +479,7 @@ def generate_audio(
         if _cache["ref_audio_latents"] is not None:
             kwargs["ref_audio_latents"] = _cache["ref_audio_latents"]
 
+        seg_t0 = time.monotonic()
         chunks = [
             np.asarray(chunk, dtype=np.float32)
             for chunk in model.generate(**kwargs)
@@ -484,6 +488,14 @@ def generate_audio(
             raise RuntimeError("VoxCPM produced no audio chunks for segment")
         wav = np.concatenate(chunks, axis=0) if len(chunks) > 1 else chunks[0]
         all_wavs.append(wav)
+        seg_dur = len(wav) / float(SAMPLE_RATE)
+        print(
+            f"[voxcpm]   -> segment {idx}/{total} done "
+            f"({time.monotonic() - seg_t0:.1f}s, {seg_dur:.1f}s audio)",
+            flush=True,
+        )
+
+    total_dur = time.monotonic() - gen_t0
 
     full_wav = np.concatenate(all_wavs) if len(all_wavs) > 1 else all_wavs[0]
 
@@ -494,8 +506,9 @@ def generate_audio(
     duration = len(full_wav) / float(SAMPLE_RATE)
 
     print(
-        f"[voxcpm] Audio: {len(segments)} segment(s), {duration:.1f}s, "
-        f"{SAMPLE_RATE}Hz, {file_size/1024:.0f}KB -> {output_path.name}",
+        f"[voxcpm] Audio: {total} segment(s), {duration:.1f}s, "
+        f"{SAMPLE_RATE}Hz, {file_size/1024:.0f}KB, gen {total_dur:.1f}s "
+        f"-> {output_path.name}",
         flush=True,
     )
 

@@ -31,6 +31,7 @@ from pathlib import Path
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
+from proglog import ProgressBarLogger
 
 SUPPORTED_EXT = (".jpg", ".jpeg", ".png", ".webp")
 DEFAULT_DISPLAY = 5
@@ -44,6 +45,49 @@ BORDER_WIDTH = 0.004   # fraction of min(w,h)
 KENBURNS_OVERSAMPLE = 1.18  # pre-crop oversize factor vs shard bbox
 KENBURNS_SCALE = 0.08   # max scale change over the intro (e.g. 1.0 -> 1.08)
 KENBURNS_PAN = 0.06      # max pan fraction of the shard bbox
+
+
+class _PrintProgressBarLogger(ProgressBarLogger):
+    """proglog logger that emits \\n-terminated print lines instead of a
+    tqdm \\r-animated bar.
+
+    tqdm's animated bar is swallowed by the `sed -u "s/^/[tag] /"` pipe in
+    scripts/run-all.sh (it only flushes on \\n, but tqdm updates use \\r).
+    This logger prints one line per bar update so progress is visible in the
+    combined console. Use it as the `logger=` argument to moviepy's
+    write_videofile / write_audiofile / iter_frames.
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self._printed: dict[str, int] = {}
+
+    def bars_callback(self, bar, attr, value, old_value):
+        if attr == "total":
+            self._printed[bar] = 0
+            print(f"[movie-py] {bar}: 0/{value}", flush=True)
+        elif attr == "index":
+            total = self.bars[bar]["total"]
+            # `value` is the count of items completed so far (0-based during
+            # iteration, then total at the end). Display it directly.
+            done = value
+            # Throttle: print at most every ~5% of the total to avoid spam,
+            # plus always print the final 100% line.
+            step = max(1, (total or 1) // 20)
+            last = self._printed.get(bar, 0)
+            if done >= (total or 1) or done - last >= step:
+                self._printed[bar] = done
+                print(f"[movie-py] {bar}: {done}/{total}", flush=True)
+
+    def callback(self, **kw):
+        msg = kw.get("message")
+        if msg:
+            print(f"[movie-py] {msg}", flush=True)
+
+
+def _print_logger() -> _PrintProgressBarLogger:
+    """Return a fresh print-based proglog logger for moviepy write_* calls."""
+    return _PrintProgressBarLogger()
 
 
 def natural_key(path: Path) -> list:
@@ -579,7 +623,7 @@ def assemble(
         codec=CODEC,
         audio_codec="aac",
         ffmpeg_params=["-pix_fmt", "yuv420p"],
-        logger="bar",
+        logger=_print_logger(),
     )
 
     for c in (clips_to_close or []):

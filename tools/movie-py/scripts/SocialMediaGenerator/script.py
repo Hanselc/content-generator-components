@@ -79,7 +79,6 @@ def build(ctx: SimpleNamespace) -> dict:
         from moviepy.video.fx import CrossFadeIn
     except Exception:
         from moviepy.video.fx.all import CrossFadeIn  # type: ignore
-    from tqdm import tqdm
 
     primitives = ctx.primitives
     params: dict = ctx.params or {}
@@ -145,7 +144,10 @@ def build(ctx: SimpleNamespace) -> dict:
     durations: list[float] = []
     audio_clips: list = []
     pad = float(transition_seconds)
-    for e in tqdm(entries, desc="Preparing slides", unit="slide"):
+    total_entries = len(entries)
+    for idx, e in enumerate(entries, start=1):
+        print(f"[SocialMediaGenerator] Preparing slide {idx}/{total_entries} ...",
+              flush=True)
         arr = primitives.load_normalized(e["path"], target_w, target_h)
         text = e.get("text")
         if text:
