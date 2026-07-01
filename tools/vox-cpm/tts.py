@@ -343,41 +343,17 @@ def _split_paragraphs(text: str) -> list[str]:
     return paragraphs
 
 
-def _append_pause_marker(segment: str) -> str:
-    """Append a pause marker ('..') to mark the end of a paragraph.
-
-    The doubled period lengthens the inter-paragraph pause in VoxCPM output.
-      - If the segment already ends with '..' (or a longer run of dots),
-        leave it as-is to avoid stacking.
-      - If it ends with sentence-ending punctuation (. ! ? 。 ！ ？), append a
-        single '.' so e.g. '.' -> '..'.
-      - Otherwise append '..'.
-    """
-    seg = segment.rstrip()
-    if not seg:
-        return seg
-    # Already ends with two-or-more dots -> don't stack.
-    if re.search(r"\.{2,}$", seg):
-        return seg
-    last = seg[-1]
-    if last in _SENTENCE_ENDS:
-        return seg + "."
-    return seg + ".."
-
-
 def _split_text(text: str, max_chars: int = MAX_SEGMENT_CHARS) -> list[str]:
-    """Split text into segments suitable for stable VoxCPM generation.
+    """Split text into paragraphs, splitting a paragraph further only when it
+    exceeds max_chars.
 
-    Splitting priority (each keeps the delimiter attached):
-      1. Paragraphs (blank lines); each paragraph's final segment gets a '..'
-         pause marker appended to lengthen the inter-paragraph pause.
-      2. Sentence-ending punctuation (. ! ? 。 ！ ？)
-      3. If a sentence exceeds max_chars: clause boundaries (, ; : 、 ， ；)
-      4. If still too long: conjunctions (y, o, pero, and, but, ...)
-      5. Last resort: word boundaries near max_chars
-
-    VoxCPM can drift on long inputs, so we segment and generate each piece
-    independently, then concatenate the waveforms into a single output.
+    The input is read as received: paragraphs are split on blank lines (intra-
+    paragraph newlines are joined to a single space by _split_paragraphs) and
+    each paragraph is passed to the model verbatim unless it exceeds max_chars,
+    in which case the length cascade (_split_long_segment) is applied. No
+    pause markers or other characters are added. Non-speakable fragments
+    (pure punctuation/whitespace) are dropped so the model is not asked to
+    synthesize them.
     """
     text = text.strip()
     if not text:
@@ -385,29 +361,17 @@ def _split_text(text: str, max_chars: int = MAX_SEGMENT_CHARS) -> list[str]:
 
     segments: list[str] = []
     for paragraph in _split_paragraphs(text):
-        # Split the paragraph on sentence-ending punctuation, then run the
-        # over-length cascade on any sentence that exceeds max_chars.
-        sentences = _split_at_punctuation(paragraph, _SENTENCE_ENDS)
-        if not sentences:
-            sentences = [paragraph]
-
-        para_segs: list[str] = []
-        for sentence in sentences:
-            if len(sentence) <= max_chars:
-                para_segs.append(sentence)
-            else:
-                para_segs.extend(_split_long_segment(sentence, max_chars))
+        if len(paragraph) <= max_chars:
+            para_segs = [paragraph]
+        else:
+            para_segs = _split_long_segment(paragraph, max_chars)
 
         # Drop non-speakable fragments (e.g. stray dots from "Hello... World"
         # would otherwise become pointless TTS segments).
         para_segs = [s for s in para_segs if _is_speakable(s)]
 
-        if not para_segs:
-            continue
-
-        # Mark the end of the paragraph on its final segment.
-        para_segs[-1] = _append_pause_marker(para_segs[-1])
-        segments.extend(para_segs)
+        if para_segs:
+            segments.extend(para_segs)
 
     return segments
 
