@@ -2,10 +2,12 @@
 
 Builds a multi-episode book podcast from a book spec describing book-level
 `welcome` / `summary_intro` / `farewell` audio plus per-chapter `content`
-(and optional `summary`) audio supplied as **arrays** of files. A chapter's
-audio is the concatenation of its content segments; this lets a chapter be
-produced as multiple TTS segments that are joined into one continuous
-chapter audio.
+and `summary` audio supplied as **arrays** of files. A chapter's audio is
+the concatenation of its content (and/or summary) segments; this lets a
+chapter be produced as multiple TTS segments that are joined into one
+continuous chunk. `content` and `summary` are each optional; a chapter with
+neither is skipped, and one with empty content but a summary is a valid
+"summary-only" chapter.
 
 Episode grouping and silence timings (min/target chapter duration,
 inter-segment silence, trailing silence) are script-internal constants and
@@ -40,6 +42,11 @@ are **not** configurable via the spec or params.
       "title": "Capítulo 3",
       "content": ["ch03.wav"],
       "summary": []
+    },
+    {
+      "title": "Capítulo 4",          // summary-only chapter (no content)
+      "content": [],
+      "summary": ["sum04.wav"]
     }
   ]
 }
@@ -85,8 +92,9 @@ silences use the internal constants:
 - `author` (string) — shown under the title in the video + metadata.
 - `chapters` (non-empty array) — each chapter object:
   - `title` (string; defaults to `Chapter {i+1}` if omitted)
-  - `content` (**array of filenames**, required, non-empty) — concatenated
-    in order to form the chapter's content audio.
+  - `content` (**array of filenames**, optional; omitted/empty = no content
+    section for that chapter) — concatenated in order to form the
+    chapter's content audio.
   - `summary` (**array of filenames**, optional; omitted/empty = no summary
     for that chapter) — concatenated in order.
 
@@ -98,8 +106,16 @@ silences use the internal constants:
   audio played at the start / before summaries / at the end of every
   episode. Omit any to drop that segment.
 
+> A chapter with **neither** `content` **nor** `summary` audio is silently
+> skipped (it has nothing to contribute to any episode). A chapter with
+> empty `content` but a non-empty `summary` is a valid "summary-only"
+> chapter: it contributes only its summary segment(s) (no content section /
+> time mark) and is included in episode grouping using its content + summary
+> total duration.
+
 > A chapter's content duration is the **sum** of its `content` segments'
-> durations.
+> durations; its grouping duration is the **sum** of its `content` **and**
+> `summary` segments' durations.
 
 ---
 
@@ -215,8 +231,9 @@ plays throughout).
 
 - **Input** — spec JSON with `book_title`/`author`/`chapters` (required),
   plus optional `intro_message`/`welcome`/`summary_intro`/`farewell`. Each
-  chapter's `content` is a non-empty array of audio files; `summary` is an
-  optional array. No duration/silence knobs — those are internal.
+  chapter's `content` and `summary` are each optional arrays of audio files;
+  a chapter with neither is skipped, one with empty content but a summary
+  is a summary-only chapter. No duration/silence knobs — those are internal.
 - **Output** — one `podcast_NN.wav` + `podcast_NN.mp4` per episode, plus a
   run-level `metadata.json`. The MP4 video is identical across episodes
   except for total duration (3-phase: intro text 5s → title+author 5s →

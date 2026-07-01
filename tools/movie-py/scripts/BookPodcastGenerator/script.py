@@ -48,11 +48,14 @@ resolve against ctx.input_folder):
       "farewell":       "farewell.wav",                  // optional, book-level
       "chapters": [                                      // required, non-empty
         {"title": "Capítulo 1",
-         "content": ["ch01a.wav", "ch01b.wav"],         // required, non-empty array
-         "summary": ["sum01.wav"]},                     // optional, array
+         "content": ["ch01a.wav", "ch01b.wav"],          // optional, array
+         "summary": ["sum01.wav"]},                      // optional, array
         {"title": "Capítulo 2",
          "content": ["ch02.wav"],
-         "summary": ["sum02a.wav", "sum02b.wav"]}
+         "summary": ["sum02a.wav", "sum02b.wav"]},
+        {"title": "Capítulo 3",                          // summary-only chapter
+         "content": [],
+         "summary": ["sum03.wav"]}
       ]
     }
 
@@ -66,9 +69,13 @@ Optional:
 
 welcome / summary_intro / farewell are optional and book-level (one each,
 played at the start / before summaries / at the end of every episode). Each
-chapter requires `content` (a non-empty array of audio filenames); `summary`
-is an optional array per chapter (omitted or empty = no summary for that
-chapter).
+chapter's `content` and `summary` are optional arrays of audio filenames;
+either or both may be omitted/empty. A chapter with neither content nor
+summary audio is silently skipped (it has nothing to contribute to any
+episode). A chapter with empty content but a non-empty summary is a valid
+"summary-only" chapter: it contributes only its summary segment(s) to its
+episode (no content section/time mark) and is included in episode grouping
+using its content + summary total duration.
 
 Episode grouping and silence timings (min/target chapter duration,
 inter-segment silence, trailing silence) are script-internal constants and
@@ -222,20 +229,22 @@ def _group_chapters(
     target_s: float,
     min_s: float,
 ) -> list[list[int]]:
-    """Group content chapter indices into episodes.
+    """Group chapter indices into episodes.
 
-    Grouping is based on content durations only. Walk chapters in order; start
-    a new group when adding the next chapter would exceed target_s. Afterwards
-    merge undersized groups (< min_s): non-last groups merge forward; if the
-    last group is undersized and there is more than one group, merge it
-    backward. Chapters with no usable content audio are skipped.
+    Grouping is based on each chapter's content + summary total duration
+    (`_audio_duration`). Walk chapters in order; start a new group when
+    adding the next chapter would exceed target_s. Afterwards merge undersized
+    groups (< min_s): non-last groups merge forward; if the last group is
+    undersized and there is more than one group, merge it backward. Chapters
+    with no usable audio (neither content nor summary) are skipped; the
+    caller already drops such chapters before this runs.
 
-    Returns a list of groups, each a list of original chapter indices.
+    Returns a list of groups, each a list of indices into `chapters`.
     """
-    # (index, duration) for chapters that have a content file.
+    # (index, duration) for chapters that have any usable audio.
     usable: list[tuple[int, float]] = []
     for i, ch in enumerate(chapters):
-        dur = ch.get("_content_duration")
+        dur = ch.get("_audio_duration")
         if dur is None or dur <= 0:
             continue
         usable.append((i, dur))
@@ -523,33 +532,47 @@ def build(ctx: SimpleNamespace) -> dict:
         raise make_video.MovieSpecError(
             f"farewell audio not found in input_folder: {raw.get('farewell')!r}")
 
-    # Resolve per-chapter audio and probe content durations.
+    # Resolve per-chapter audio and probe durations.
+    # `content` and `summary` are each optional arrays; a chapter with neither
+    # is skipped (nothing to contribute to any episode). A chapter with empty
+    # content but a non-empty summary is a valid "summary-only" chapter.
     chapters: list[dict] = []
+    skipped_chapters: list[int] = []
     for i, ch in enumerate(chapters_raw):
         if not isinstance(ch, dict):
             raise make_video.MovieSpecError(f"chapters[{i}] must be an object")
         title = ch.get("title") or f"Chapter {i + 1}"
         content_paths = _resolve_list(input_folder, ch.get("content"),
-                                      "content", i)
-        if not content_paths:
-            raise make_video.MovieSpecError(
-                f"chapters[{i}] content is required and must be a non-empty "
-                f"array of audio filenames")
+                                       "content", i)
         summary_paths = _resolve_list(input_folder, ch.get("summary"),
-                                      "summary", i)
+                                       "summary", i)
+        if not content_paths and not summary_paths:
+            # Nothing to contribute; skip silently.
+            skipped_chapters.append(i)
+            continue
+        content_duration = sum(_audio_duration(p) for p in content_paths)
+        summary_duration = sum(_audio_duration(p) for p in summary_paths)
         chapters.append({
             "title": title,
             "content_paths": content_paths,
             "summary_paths": summary_paths,
-            "_content_duration": sum(_audio_duration(p)
-                                     for p in content_paths),
+            "_content_duration": content_duration,
+            # Content + summary total drives episode grouping so that
+            # summary-only chapters still get their own grouping weight.
+            "_audio_duration": content_duration + summary_duration,
         })
+
+    if skipped_chapters:
+        print(f"[BookPodcastGenerator] skipped {len(skipped_chapters)} "
+              f"chapter(s) with no content or summary audio: "
+              f"{skipped_chapters}", flush=True)
 
     # --- Group chapters into episodes -------------------------------------
     groups = _group_chapters(chapters, target_s=target_s, min_s=min_s)
     if not groups:
         raise make_video.MovieSpecError(
-            "no usable chapter content audio to build episodes from")
+            "no usable chapter audio (content or summary) to build episodes "
+            "from")
 
     output_folder = Path(ctx.output_folder).resolve()
     output_folder.mkdir(parents=True, exist_ok=True)
