@@ -14,11 +14,14 @@ lets a chapter be produced as multiple TTS segments that are joined into one
 continuous chapter audio.
 
 The MP4 is a 3-phase static-frame video shared across episodes (only the
-audio track and total duration differ per episode):
-    phase 1 (0 - INTRO_MESSAGE_SECONDS):     near-black + intro_message text
-    phase 2 (INTRO_MESSAGE_SECONDS -         near-black + book_title + author
-             INTRO_MESSAGE_SECONDS + TITLE_SECONDS)
-    phase 3 (after that, to episode end):    near-black (no text)
+audio track and total duration differ per episode). The background is pure
+black; on-screen text is faint dark-gray (#222222, no outline) rendered with
+the vendored DejaVu fonts (./assets). Each text phase fades in then back out
+to black over 1s; the black phase is plain black with no text:
+    phase 1 (0 - INTRO_MESSAGE_SECONDS):     black + intro_message text (regular)
+    phase 2 (INTRO_MESSAGE_SECONDS -         black + book_title (bold, -80px) +
+             INTRO_MESSAGE_SECONDS + TITLE_SECONDS)   author (regular, +80px)
+    phase 3 (after that, to episode end):    black (no text)
 The intro phase is skipped when no `intro_message` is provided; the title
 phase then starts at t=0. The episode's audio plays continuously throughout
 all three phases, so the black phase lengthens or shortens to match each
@@ -26,9 +29,11 @@ episode's duration.
 
 This is a script module under movie-py's scripts registry: it exposes
 build(ctx) -> dict, PARAM_SCHEMA and META, and reuses the shared primitives
-in make_video.py (silent_audio_clip, render_title_overlay,
-overlay_caption_on_array, load_font, FPS, CODEC). It does NOT call
-make_video.assemble() because that forces a <timestamp>.mp4 name and a
+in make_video.py (silent_audio_clip, FPS, CODEC). Text rendering is
+self-contained (vendored DejaVu fonts under ./assets) so the video style
+(faint dark-gray #222222 text on pure black, with per-phase 1s fades) is
+independent of make_video's caption/title-overlay primitives. It does NOT
+call make_video.assemble() because that forces a <timestamp>.mp4 name and a
 single-mp4 result; here we need per-episode podcast_NN.{wav,mp4} naming
 plus an extra WAV + metadata.json, so the finalizer is inlined.
 
@@ -102,7 +107,8 @@ META: dict[str, Any] = {
         "duration, then concatenates welcome + contents + summary intro + "
         "summaries + farewell with silence padding. Emits per-episode WAV + "
         "MP4 (3-phase static-frame video: intro message -> title/author -> "
-        "black, audio throughout) and a run-level metadata.json with "
+        "black, audio throughout; faint #222222 text on pure black with 1s "
+        "fades, vendored DejaVu fonts) and a run-level metadata.json with "
         "per-chapter time marks."
     ),
     "version": "2.0.0",
@@ -117,11 +123,30 @@ DEFAULT_TRAILING_SILENCE_MS = 5000
 # Video render settings for the MP4 deliverable.
 VIDEO_W = 1920
 VIDEO_H = 1080
-BG_COLOR = (8, 8, 12)  # near-black
+BG_COLOR = (0, 0, 0)  # pure black
+# Text style (matches LibrosParaDormirMejor deliverables: faint dark-gray on
+# black, no outline, regular DejaVu for author/intro, bold DejaVu for title).
+TEXT_COLOR = (34, 34, 34)  # #222222, barely visible on black
+TITLE_FONT_SIZE = 36
+AUTHOR_FONT_SIZE = 24
+INTRO_FONT_SIZE = 32
+# Title sits 80px above the vertical center, author 80px below it (matches
+# the reference project's (h-size)/2-80 / (h-size)/2+80 layout, so the two
+# never overlap).
+TITLE_Y_OFFSET = -80
+AUTHOR_Y_OFFSET = 80
+# Fonts are vendored under this script's assets/ folder so the video style is
+# self-contained and independent of system-installed fonts.
+ASSETS_DIR = Path(__file__).resolve().parent / "assets"
+REGULAR_FONT_NAME = "DejaVuSans.ttf"
+BOLD_FONT_NAME = "DejaVuSans-Bold.ttf"
+# Per-phase fade-to/from-black duration in seconds (matches the reference).
+FADE_SECONDS = 1.0
 # 3-phase video timing (hardcoded). Phase 1 shows the optional intro_message
-# text; phase 2 shows book_title + author; phase 3 is plain near-black. The
+# text; phase 2 shows book_title + author; phase 3 is plain black. The
 # episode audio plays throughout, so phase 3 stretches to match each
-# episode's duration.
+# episode's duration. Each text phase fades in then back out to black over
+# FADE_SECONDS at its start and end.
 INTRO_MESSAGE_SECONDS = 5.0
 TITLE_SECONDS = 5.0
 WELCOME_TITLE = "Introducción"
@@ -255,35 +280,90 @@ def _group_chapters(
     return groups
 
 
+def _load_face(size: int, bold: bool = False) -> Any:
+    """Load a PIL FreeTypeFont face from this script's assets/ folder.
+
+    Falls back to the system DejaVu fonts and finally to PIL's default font if
+    the vendored files are missing. `bold` selects DejaVuSans-Bold.ttf, else
+    DejaVuSans.ttf.
+    """
+    from PIL import ImageFont
+    primary = ASSETS_DIR / (BOLD_FONT_NAME if bold else REGULAR_FONT_NAME)
+    fallback_name = BOLD_FONT_NAME if bold else REGULAR_FONT_NAME
+    try:
+        return ImageFont.truetype(str(primary), size)
+    except Exception:
+        try:
+            return ImageFont.truetype(fallback_name, size)
+        except Exception:
+            try:
+                return ImageFont.truetype("DejaVuSans.ttf", size)
+            except Exception:
+                return ImageFont.load_default()
+
+
+def _render_text_layer(
+    size: tuple[int, int],
+    text: str,
+    font_size: int,
+    bold: bool,
+    y_center_offset: int,
+) -> Any:
+    """Render a single line of faint dark-gray text on a transparent RGBA
+    layer, horizontally centered, vertically centered +/- y_center_offset.
+
+    No stroke/outline (matches the reference project's barely-visible-on-black
+    look). The returned RGBA image has a fully transparent background so the
+    caller can animate its alpha per-frame for fade in/out.
+    """
+    from PIL import Image, ImageDraw
+    w, h = size
+    layer = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    if not text:
+        return layer
+    draw = ImageDraw.Draw(layer)
+    font = _load_face(font_size, bold=bold)
+    bbox = draw.textbbox((0, 0), text, font=font)
+    tw = bbox[2] - bbox[0]
+    th = bbox[3] - bbox[1]
+    tx = (w - tw) // 2 - bbox[0]
+    ty = (h - th) // 2 - bbox[1] + y_center_offset
+    draw.text((tx, ty), text, fill=TEXT_COLOR + (255,), font=font)
+    return layer
+
+
 def _build_black_frame() -> np.ndarray:
-    """Build a single 1920x1080 near-black RGB frame (no text)."""
+    """Build a single 1920x1080 pure-black RGB frame (no text)."""
     from PIL import Image
     return np.array(Image.new("RGB", (VIDEO_W, VIDEO_H), BG_COLOR))
 
 
-def _build_black_title_frame(text_lines: list[str]) -> np.ndarray:
-    """Build a single 1920x1080 near-black RGB frame with centered, faded
-    title/author text using make_video's caption primitives."""
-    from PIL import Image
-    h, w = VIDEO_H, VIDEO_W
-    base = Image.new("RGB", (w, h), BG_COLOR)
-    arr = np.array(base)
-    for line in text_lines:
-        if not line:
-            continue
-        arr = make_video.overlay_caption_on_array(arr, line)
-    return arr
+def _build_intro_layer(message: str) -> Any:
+    """Build a transparent RGBA layer with the intro_message centered (regular
+    DejaVu, size INTRO_FONT_SIZE). Composited by the MP4 writer with a
+    time-varying alpha during the intro phase."""
+    return _render_text_layer(
+        (VIDEO_W, VIDEO_H), message,
+        font_size=INTRO_FONT_SIZE, bold=False, y_center_offset=0,
+    )
 
 
-def _build_intro_frame(message: str) -> np.ndarray:
-    """Build a single 1920x1080 near-black RGB frame with the intro message
-    text centered (rendered with the title-overlay style for prominence)."""
-    from PIL import Image
-    w, h = VIDEO_W, VIDEO_H
-    base = Image.new("RGB", (w, h), BG_COLOR)
-    layer = make_video.render_title_overlay((w, h), message)
-    out = Image.alpha_composite(base.convert("RGBA"), layer)
-    return np.array(out.convert("RGB"))
+def _build_title_layer(title: str) -> Any:
+    """Build a transparent RGBA layer with the book title (bold DejaVu, size
+    TITLE_FONT_SIZE, 80px above center)."""
+    return _render_text_layer(
+        (VIDEO_W, VIDEO_H), title,
+        font_size=TITLE_FONT_SIZE, bold=True, y_center_offset=TITLE_Y_OFFSET,
+    )
+
+
+def _build_author_layer(author: str) -> Any:
+    """Build a transparent RGBA layer with the author (regular DejaVu, size
+    AUTHOR_FONT_SIZE, 80px below center)."""
+    return _render_text_layer(
+        (VIDEO_W, VIDEO_H), author,
+        font_size=AUTHOR_FONT_SIZE, bold=False, y_center_offset=AUTHOR_Y_OFFSET,
+    )
 
 
 def _write_wav(audio_clip, out_path: Path) -> None:
@@ -297,24 +377,70 @@ def _write_wav(audio_clip, out_path: Path) -> None:
     )
 
 
-def _write_mp4(frames: list[tuple[np.ndarray, float, float]],
+def _phase_alpha(t: float, start_s: float, end_s: float,
+                 fade_s: float) -> float:
+    """Per-phase fade-in/fade-out alpha, clamped to [0, 1].
+
+    Matches the reference project's drawtext alpha expression: ramps 0->1 over
+    fade_s at the phase start, holds 1, ramps 1->0 over fade_s at the phase
+    end. Returns 0 outside [start_s, end_s].
+    """
+    if t < start_s or t >= end_s:
+        return 0.0
+    fd = min(fade_s, (end_s - start_s) / 2.0)
+    local = t - start_s
+    phase_len = end_s - start_s
+    if local < fd:
+        return local / fd if fd > 0 else 1.0
+    if local > phase_len - fd:
+        return (phase_len - local) / fd if fd > 0 else 1.0
+    return 1.0
+
+
+def _write_mp4(phases: list[dict],
+               layers: dict[str, Any],
+               black_frame: np.ndarray,
                audio_clip, duration: float,
                out_path: Path) -> None:
     """Write a static-phase MP4 (1920x1080) with the given audio.
 
-    `frames` is a list of (frame_array, start_s, end_s) tuples in timeline
-    order; the frame whose [start_s, end_s) window contains t is shown. The
-    last tuple's end_s may be +inf to cover the remainder. Audio plays across
-    the whole `duration`.
+    `phases` is a list of {kind, start_s, end_s} in timeline order; `kind` is
+    one of "intro", "title", "black". `layers` maps "intro" -> RGBA layer,
+    "title" -> RGBA layer, "author" -> RGBA layer (the title phase composites
+    both title and author layers at the shared phase alpha). The black phase
+    has no layer. Each text phase fades in/out to black over FADE_SECONDS.
+    Audio plays across the whole `duration`.
     """
+    from PIL import Image
     from moviepy import VideoClip
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
+    black_rgba = Image.fromarray(black_frame).convert("RGBA")
+    h, w = black_frame.shape[:2]
+
+    # Pre-bind each phase's kind to speed up the per-frame lookup.
     def make_frame(t: float):
-        for arr, start_s, end_s in frames:
-            if start_s <= t < end_s:
-                return arr
-        return frames[-1][0]
+        active = None
+        for ph in phases:
+            if ph["start_s"] <= t < ph["end_s"]:
+                active = ph
+                break
+        if active is None:
+            active = phases[-1]
+        kind = active["kind"]
+        if kind == "black":
+            return black_frame
+        alpha = _phase_alpha(t, active["start_s"], active["end_s"],
+                             FADE_SECONDS)
+        if alpha <= 0.0:
+            return black_frame
+        frame = black_rgba
+        if kind == "intro":
+            frame = _composite_alpha(frame, layers["intro"], alpha)
+        elif kind == "title":
+            frame = _composite_alpha(frame, layers["title"], alpha)
+            frame = _composite_alpha(frame, layers["author"], alpha)
+        return np.array(frame.convert("RGB"))
 
     clip = VideoClip(make_frame, duration=duration).with_audio(audio_clip)
     clip.write_videofile(
@@ -326,6 +452,24 @@ def _write_mp4(frames: list[tuple[np.ndarray, float, float]],
         logger=None,
     )
     clip.close()
+
+
+def _composite_alpha(base_rgba: Any, layer_rgba: Any, alpha: float) -> Any:
+    """Composite `layer_rgba` onto `base_rgba` with a global scalar alpha.
+
+    Both are RGBA PIL Images. The layer's existing per-pixel alpha is scaled by
+    `alpha` (so text stays crisp while the whole text fades together). Returns
+    a new RGBA PIL Image.
+    """
+    if alpha <= 0:
+        return base_rgba
+    from PIL import Image
+    if alpha >= 1.0:
+        return Image.alpha_composite(base_rgba, layer_rgba)
+    scaled = layer_rgba.copy()
+    a = scaled.split()[3]
+    scaled.putalpha(a.point(lambda v: int(v * alpha)))
+    return Image.alpha_composite(base_rgba, scaled)
 
 
 def build(ctx: SimpleNamespace) -> dict:
@@ -413,27 +557,39 @@ def build(ctx: SimpleNamespace) -> dict:
     silence_s = silence_ms / 1000.0
     trailing_s = trailing_ms / 1000.0
 
-    # Static frames for the 3-phase video, pre-rendered once and shared across
-    # episodes (only audio + total duration differ per episode).
+    # Static frames / text layers for the 3-phase video, pre-rendered once and
+    # shared across episodes (only audio + total duration differ per episode).
+    # The MP4 writer composites the RGBA text layers onto a pure-black frame
+    # with a per-phase fade in/out alpha, so no fades are baked into pixels.
     black_frame = _build_black_frame()
-    title_frame = _build_black_title_frame([book_title, author])
-    intro_frame = (_build_intro_frame(intro_message)
+    title_layer = _build_title_layer(book_title)
+    author_layer = _build_author_layer(author)
+    intro_layer = (_build_intro_layer(intro_message)
                    if intro_message else None)
+    layers = {
+        "intro": intro_layer,
+        "title": title_layer,
+        "author": author_layer,
+    }
 
-    # Build the (frame, start_s, end_s) phase list. The intro phase is omitted
-    # when there is no intro_message; the title phase then starts at t=0. The
-    # final black phase runs to +inf so it stretches to any episode duration.
-    if intro_frame is not None:
-        video_phases: list[tuple[np.ndarray, float, float]] = [
-            (intro_frame, 0.0, INTRO_MESSAGE_SECONDS),
-            (title_frame, INTRO_MESSAGE_SECONDS,
-             INTRO_MESSAGE_SECONDS + TITLE_SECONDS),
-            (black_frame, INTRO_MESSAGE_SECONDS + TITLE_SECONDS, float("inf")),
+    # Build the phase descriptor list. The intro phase is omitted when there
+    # is no intro_message; the title phase then starts at t=0. The final black
+    # phase runs to +inf so it stretches to any episode duration.
+    if intro_layer is not None:
+        video_phases: list[dict] = [
+            {"kind": "intro", "start_s": 0.0,
+             "end_s": INTRO_MESSAGE_SECONDS},
+            {"kind": "title", "start_s": INTRO_MESSAGE_SECONDS,
+             "end_s": INTRO_MESSAGE_SECONDS + TITLE_SECONDS},
+            {"kind": "black",
+             "start_s": INTRO_MESSAGE_SECONDS + TITLE_SECONDS,
+             "end_s": float("inf")},
         ]
     else:
         video_phases = [
-            (title_frame, 0.0, TITLE_SECONDS),
-            (black_frame, TITLE_SECONDS, float("inf")),
+            {"kind": "title", "start_s": 0.0, "end_s": TITLE_SECONDS},
+            {"kind": "black", "start_s": TITLE_SECONDS,
+             "end_s": float("inf")},
         ]
 
     episodes_meta: list[dict] = []
@@ -519,7 +675,8 @@ def build(ctx: SimpleNamespace) -> dict:
               f"{ep_wav.name}", flush=True)
 
         # --- Write MP4 (3-phase static frames + AAC audio) ----------------
-        _write_mp4(video_phases, episode_audio, episode_duration, ep_mp4)
+        _write_mp4(video_phases, layers, black_frame,
+                   episode_audio, episode_duration, ep_mp4)
         print(f"[BookPodcastGenerator] episode {ep_idx}: MP4 -> {ep_mp4.name}",
               flush=True)
 
