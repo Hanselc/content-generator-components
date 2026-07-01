@@ -156,7 +156,7 @@ def _get_model(
 
     local_model_path = _resolve_local_model(model_name)
 
-    print(f"[voxcpm] Loading model: {model_name} (device={device}) ...", flush=True)
+    print(f"Loading model: {model_name} (device={device}) ...", flush=True)
     model = NanoVoxCPM.from_pretrained(
         model=local_model_path,
         devices=[gpu_index],
@@ -171,7 +171,7 @@ def _get_model(
     # Pre-encode the prompt pair once (add_prompt first, encode_latents fallback).
     prompt_bytes = _read_wav_bytes(prompt_wav_path)
     prompt_dur = _wav_duration_seconds(prompt_wav_path)
-    print(f"[voxcpm] Encoding prompt ({prompt_dur:.1f}s) ...", flush=True)
+    print(f"Encoding prompt ({prompt_dur:.1f}s) ...", flush=True)
     try:
         _cache["prompt_id"] = model.add_prompt(prompt_bytes, "wav", prompt_text)
         _cache["prompt_latents_fallback"] = None
@@ -182,7 +182,7 @@ def _get_model(
     # Optional reinforce/reference clip -> ref_audio_latents.
     if reference_wav_path:
         ref_dur = _wav_duration_seconds(reference_wav_path)
-        print(f"[voxcpm] Encoding reference ({ref_dur:.1f}s) ...", flush=True)
+        print(f"Encoding reference ({ref_dur:.1f}s) ...", flush=True)
         try:
             ref_bytes = _read_wav_bytes(reference_wav_path)
             _cache["ref_audio_latents"] = model.encode_latents(ref_bytes, "wav")
@@ -191,7 +191,7 @@ def _get_model(
     else:
         _cache["ref_audio_latents"] = None
 
-    print("[voxcpm] Model ready.", flush=True)
+    print("Model ready.", flush=True)
     atexit.register(teardown)
     return model
 
@@ -428,7 +428,7 @@ def generate_audio(
     total = len(segments)
     gen_t0 = time.monotonic()
     for idx, seg in enumerate(segments, start=1):
-        print(f"[voxcpm] Generating segment {idx}/{total} ...", flush=True)
+        print(f"Generating segment {idx}/{total} ...", flush=True)
         kwargs: dict = dict(
             target_text=seg,
             cfg_value=cfg_value,
@@ -454,7 +454,7 @@ def generate_audio(
         all_wavs.append(wav)
         seg_dur = len(wav) / float(SAMPLE_RATE)
         print(
-            f"[voxcpm]   -> segment {idx}/{total} done "
+            f"  -> segment {idx}/{total} done "
             f"({time.monotonic() - seg_t0:.1f}s, {seg_dur:.1f}s audio)",
             flush=True,
         )
@@ -470,7 +470,7 @@ def generate_audio(
     duration = len(full_wav) / float(SAMPLE_RATE)
 
     print(
-        f"[voxcpm] Audio: {total} segment(s), {duration:.1f}s, "
+        f"Audio: {total} segment(s), {duration:.1f}s, "
         f"{SAMPLE_RATE}Hz, {file_size/1024:.0f}KB, gen {total_dur:.1f}s "
         f"-> {output_path.name}",
         flush=True,
